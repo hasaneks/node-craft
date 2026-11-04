@@ -1,0 +1,68 @@
+{
+  "id": "E07",
+  "title": "The same write delivered twice at the same time",
+  "arm": "baseline",
+  "rep": 1,
+  "status": "graded",
+  "score": 6,
+  "max": 10,
+  "percent": 60,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch",
+    "node-craft-contract"
+  ],
+  "loadedSkills": [],
+  "turns": 2,
+  "seconds": 43,
+  "cost": 0.1059,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 1,
+        "reason": "Idempotency-Key per user action, reused on retry, UNIQUE(user_id, idempotency_key) in Postgres. But there is no payload fingerprint, and the key is not scoped by operation or tenant."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The redemption claim, cap update and ledger credit all run in one transaction. A concurrent duplicate blocks on the unique index and then replays on commit. The database handles the concurrency."
+      },
+      "R3": {
+        "score": 0,
+        "reason": "There is no same-key, different-payload check. The 409 is only for a different key on the same user and voucher. A reused key with a different voucher code would just insert a new row and hit the key unique constraint, and the handler's recovery path does not cover that."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "UNIQUE(voucher_id, user_id) on redemptions is the primary guard. UNIQUE(ref_type, ref_id) on the ledger is a third."
+      },
+      "R5": {
+        "score": 1,
+        "reason": "It proposes a concurrency test with 20 parallel calls, same key and different keys, asserting one ledger row. It does not say the test should run against real PostgreSQL."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "In-memory deduplication or a Redis TTL key as the only guard",
+        "violated": false,
+        "evidence": "It says an in-memory or Redis-only guard should be avoided and uses database constraints."
+      },
+      {
+        "item": "Check then insert without a unique constraint",
+        "violated": false,
+        "evidence": "It warns that a SELECT-then-credit check races and uses unique constraints."
+      },
+      {
+        "item": "Relying on a queue job id for uniqueness",
+        "violated": false,
+        "evidence": "No queue is used."
+      },
+      {
+        "item": "Telling the client to generate a new key on retry",
+        "violated": false,
+        "evidence": "It says to reuse the same key on every retry. A new key is suggested only for a genuinely new user attempt."
+      }
+    ],
+    "summary": "It is a sound database-constraint design with an atomic transaction and a business unique guard. It lacks a payload fingerprint and same-key-different-payload 409 handling, and its test plan does not name real PostgreSQL.",
+    "cost": 0.039747199999999996
+  },
+  "answer": "I found no project in the working directory, only a `.gitignore`. So this assumes Postgres and a Node/TypeScript API using `pg`, and the file paths are suggestions. The approach is the same on any stack.\n\n## Decision\n\nDon't rely on \"check whether it was redeemed, then credit\". Two concurrent requests both pass the check. Instead, make the database reject the second credit with a unique constraint, and write the redemption record and the credit in one transaction.\n\nI'd use two layers:\n\n1. **Business uniqueness:** `UNIQUE (voucher_id, user_id)` on redemptions, or `UNIQUE (voucher_id)` if a voucher is single-use globally. This is the real guarantee. It holds even if the client sends no idempotency key, a buggy client generates a new one, or a different code path redeems the same voucher.\n2. **Idempotency key:** the client sends one key per user action and reuses it on retry. A retry then gets the original response back instead of an \"already redeemed\" error. The user sees success on a flaky network, not a confusing failure after the credit was actually given.\n\nA third constraint makes the credit itself idempotent: `UNIQUE (ref_type, ref_id)` on the credit ledger. Even if the redemption logic had a bug, the same redemption could not be credited twice.\n\n## Tables\n\n```sql\nCREATE TABLE vouchers (\n  id               bigserial PRIMARY KEY,\n  code             text UNIQUE NOT NULL,\n  credit_amount    bigint NOT NULL CHECK (credit_amount > 0),  -- minor units\n  max_redemptions  int NOT NULL DEFAULT 1,\n  redeemed_count   int NOT NULL DEFAULT 0,\n  expires_at       timestamptz,\n  CHECK (redeemed_count <= max_redemptions)\n);\n\nCREATE TABLE voucher_redemptions (\n  id               bigserial PRIMARY KEY,\n  voucher_id       bigint NOT NULL REFERENCES vouchers(id),\n  user_id          bigint NOT NULL,\n  idempotency_key  uuid   NOT NULL,\n  credit_amount    bigint NOT NULL,\n  created_at       timestamptz NOT NULL DEFAULT now(),\n  UNIQUE (voucher_id, user_id),          -- once per user per voucher\n  UNIQUE (user_id, idempotency_key)      -- retries of the same request\n);\n\nCREATE TABLE credit_ledger (\n  id         bigserial PRIMARY KEY,\n  user_id    bigint NOT NULL,\n  amount     bigint NOT NULL,\n  ref_type   text   NOT NULL,            -- 'voucher_redemption'\n  ref_id     bigint NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  UNIQUE (ref_type, ref_id)              -- a redemption can be credited once\n);\n```\n\nThe user's balance is `SUM(amount)` over the ledger, or a cached column updated in the same transaction. The ledger is the source of truth.\n\n## Request handling\n\n`POST /vouchers/redeem` with the header `Idempotency-Key: <uuid>` and body `{ code }`.\n\n```ts\n// src/vouchers/redeem.ts\nexport async function redeem(db: Pool, userId: number, code: string, key: string) {\n  const c = await db.connect();\n  try {\n    await c.query('BEGIN');\n\n    const v = (await c.query(\n      `SELECT id, credit_amount FROM vouchers WHERE code = $1`, [code])).rows[0];\n    if (!v) { await c.query('ROLLBACK'); return { status: 404 }; }\n\n    // 1. Claim the redemption. A concurrent duplicate blocks here until the\n    //    first transaction commits or rolls back, then gets 0 rows.\n    const ins = await c.query(\n      `INSERT INTO voucher_redemptions (voucher_id, user_id, idempotency_key, credit_amount)\n       VALUES ($1,$2,$3,$4)\n       ON CONFLICT DO NOTHING\n       RETURNING id`,\n      [v.id, userId, key, v.credit_amount]);\n\n    if (ins.rowCount === 0) {\n      // Duplicate: same key (retry) or same user+voucher. Return the stored result.\n      await c.query('ROLLBACK');\n      const prev = (await db.query(\n        `SELECT id, credit_amount, idempotency_key FROM voucher_redemptions\n          WHERE voucher_id=$1 AND user_id=$2`, [v.id, userId])).rows[0];\n      return prev.idempotency_key === key\n        ? { status: 200, body: { redeemed: true, amount: prev.credit_amount, replay: true } }\n        : { status: 409, body: { error: 'already_redeemed' } };\n    }\n\n    // 2. Enforce the global cap and expiry atomically.\n    const cap = await c.query(\n      `UPDATE vouchers SET redeemed_count = redeemed_count + 1\n        WHERE id=$1 AND redeemed_count < max_redemptions\n          AND (expires_at IS NULL OR expires_at > now())`, [v.id]);\n    if (cap.rowCount === 0) { await c.query('ROLLBACK'); return { status: 410, body: { error: 'exhausted_or_expired' } }; }\n\n    // 3. Credit, tied to the redemption id.\n    await c.query(\n      `INSERT INTO credit_ledger (user_id, amount, ref_type, ref_id)\n       VALUES ($1,$2,'voucher_redemption',$3)`, [userId, v.credit_amount, ins.rows[0].id]);\n\n    await c.query('COMMIT');\n    return { status: 200, body: { redeemed: true, amount: v.credit_amount } };\n  } catch (e) {\n    await c.query('ROLLBACK');\n    throw e;\n  } finally { c.release(); }\n}\n```\n\nWhy this holds under your exact scenario:\n\n- **Timeout, then retry while the first request is still running:** the server keeps processing after the client gives up. The retry's `INSERT` hits the unique index and waits for the first transaction. When the first commits, the retry gets 0 rows and returns the same success with `replay: true`. When the first rolls back, the retry proceeds and does the work. No \"in progress\" status or lock table is needed, because the claim, the cap and the credit commit or fail together.\n- **Same key vs. different key:** the same key returns 200 with the original result. A different key for the same user and voucher returns 409.\n- **Default `READ COMMITTED` isolation is enough**, because correctness comes from the constraints, not from read-then-write logic.\n\n## Client change (mobile)\n\nGenerate the UUID when the user taps \"Redeem\", store it with the pending action, and send the same key on every retry of that action. Don't generate it inside the HTTP layer's retry loop, or each attempt gets a new key. A genuinely new attempt, such as the user tapping again after a clear failure, can use a new key. The `(voucher_id, user_id)` constraint still protects the credit.\n\n## Files I'd add or change\n\n- `migrations/XXXX_voucher_redemptions.sql`: the three tables above.\n- `src/vouchers/redeem.ts`: the handler logic above.\n- `src/routes/vouchers.ts`: validate that the `Idempotency-Key` header is a UUID and return 400 if it's missing or malformed.\n- Mobile API client: create the key once per user action and attach it to retries.\n- `tests/vouchers/redeem.concurrency.test.ts`: fire 20 parallel `redeem` calls with the same key, then 20 with different keys. Assert exactly one `credit_ledger` row and one balance increase each time. Also test the sequential retry case.\n\n## Things to avoid\n\n- A `SELECT ... WHERE redeemed` check before crediting. It races.\n- An in-memory or Redis-only lock or key cache as the only guard. It can expire or fail while the retry is still in flight. It's fine as an optimisation in front of the database, never in place of it.\n- Crediting outside the transaction, for example after an HTTP call to a wallet service. If credit goes through another service, pass `redemption.id` as that service's idempotency key.\n- Idempotency-key rows that expire. Here they live with the redemption row, so a late retry is still safe.\n\nIf you share the actual stack and schema, I can adapt this to your ORM and existing wallet or ledger tables."
+}

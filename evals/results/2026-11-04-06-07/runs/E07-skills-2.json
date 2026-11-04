@@ -1,0 +1,70 @@
+{
+  "id": "E07",
+  "title": "The same write delivered twice at the same time",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 10,
+  "max": 10,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch",
+    "node-craft-contract"
+  ],
+  "loadedSkills": [
+    "node-craft-arch"
+  ],
+  "turns": 6,
+  "seconds": 51,
+  "cost": 0.158,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "idempotency_keys table with PK (tenant_id, user_id, operation, key), a fingerprint column, in PostgreSQL. The client reuses one key per tap on retry, and a retention purge is included."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The key claim, voucher update, ledger insert and stored response all run in one transaction. A concurrent duplicate blocks on the unique index and then replays. lock_timeout is mapped to 409 IN_PROGRESS with Retry-After."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "The code compares the stored fingerprint with the new one and throws 409 IDEMPOTENCY_KEY_REUSED on a mismatch. A test covers it."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "UNIQUE (source_type, source_id) on credit_ledger, plus the conditional UPDATE on vouchers.redeemed_at IS NULL, give a business-level second guard."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Tests use real PostgreSQL with Promise.all concurrent requests, for same key and for different keys. The answer states they were not run."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "In-memory deduplication or a Redis TTL key as the only guard",
+        "violated": false,
+        "evidence": "The answer rejects in-memory flags and Redis SETNX with a TTL, and uses PostgreSQL constraints."
+      },
+      {
+        "item": "\"Check then insert\" without a unique constraint",
+        "violated": false,
+        "evidence": "It uses INSERT ... ON CONFLICT on a primary key and an atomic conditional UPDATE. It explicitly rejects SELECT-then-INSERT."
+      },
+      {
+        "item": "Relying on a queue job id for uniqueness",
+        "violated": false,
+        "evidence": "No queue job id is used for uniqueness."
+      },
+      {
+        "item": "Telling the client to generate a new key on retry",
+        "violated": false,
+        "evidence": "The client is told to send the same key on every automatic retry. A new key is only for a new tap after a definite failure."
+      }
+    ],
+    "summary": "The answer fully meets all five rubric items, with the key table, fingerprint, single-transaction handling, a business unique constraint and concurrent PostgreSQL tests, and it violates no forbidden decision.",
+    "cost": 0.0450232
+  },
+  "answer": "The working directory holds only the node-craft skill files and no application code, so this is a design based on the project's own rules (`node-craft-arch/references/transactions-idempotency.md` and `node-craft-contract/references/idempotency-contract.md`), not a patch to existing code. File names below are proposals.\n\n## Decision\n\nUse two independent guards. Each one covers a case the other can't.\n\n1. **`Idempotency-Key` header.** This covers the retry you describe. The app sends one UUID per tap on \"Redeem\" and reuses it on every automatic retry. The server runs the work once and replays the stored response for repeats.\n2. **Database uniqueness on the business fact.** A voucher can be redeemed once, and a credit ledger row for a given source can exist once. This holds even if a client has no key, sends a fresh key, or two devices race.\n\nI would not use an in-memory flag, a Redis `SETNX` with a TTL, or \"SELECT, then INSERT\" as the guard. They are lost on restart, not shared across replicas, or racy. For money-like credit, PostgreSQL constraints are the source of truth.\n\n## Tables\n\n```sql\n-- migrations/0007_voucher_redeem_idempotency.sql\nCREATE TABLE vouchers (\n  id           uuid PRIMARY KEY,\n  code_hash    text        NOT NULL UNIQUE,\n  credit_units bigint      NOT NULL CHECK (credit_units > 0),  -- integer minor units, not float\n  expires_at   timestamptz NOT NULL,\n  redeemed_by  uuid        REFERENCES users(id),\n  redeemed_at  timestamptz,\n  CHECK ((redeemed_by IS NULL) = (redeemed_at IS NULL))\n);\n\n-- Append-only ledger. The balance is derived from it, or kept in sync in the same transaction.\nCREATE TABLE credit_ledger (\n  id           uuid PRIMARY KEY,\n  user_id      uuid        NOT NULL REFERENCES users(id),\n  amount       bigint      NOT NULL,\n  source_type  text        NOT NULL,          -- 'voucher'\n  source_id    uuid        NOT NULL,          -- vouchers.id\n  created_at   timestamptz NOT NULL DEFAULT now(),\n  UNIQUE (source_type, source_id)             -- credit for one voucher can exist only once\n);\n\nCREATE TABLE idempotency_keys (\n  tenant_id     uuid        NOT NULL,\n  user_id       uuid        NOT NULL,\n  operation     text        NOT NULL,\n  key           text        NOT NULL CHECK (char_length(key) BETWEEN 8 AND 255),\n  fingerprint   text        NOT NULL,\n  response_code int         NOT NULL,\n  response_body jsonb       NOT NULL,\n  created_at    timestamptz NOT NULL DEFAULT now(),\n  PRIMARY KEY (tenant_id, user_id, operation, key)\n);\nCREATE INDEX idempotency_keys_created_at_idx ON idempotency_keys (created_at);\n```\n\nWhy this shape:\n- The `UNIQUE (source_type, source_id)` on the ledger is the last line of defence. Even a buggy code path cannot credit the same voucher twice.\n- The key is scoped per user and operation, so two users can't collide on one UUID.\n- The key row and the credit are written in one transaction. A failure rolls back both, so a failed attempt doesn't use up the key.\n- Purge old key rows with a scheduled job after the retention window (for example 24 hours to 7 days, matching how long the app may retry).\n\n## Request handling\n\nEndpoint: `POST /v1/vouchers/redeem`, with the `Idempotency-Key` header required (`400 IDEMPOTENCY_KEY_REQUIRED` if it is missing). Add it to the OpenAPI schema. The identity comes from the verified token, never from the body.\n\nFlow inside one use case (`src/modules/vouchers/redeem-voucher.usecase.ts`). The route is thin and only calls it.\n\n```ts\nexport async function redeemVoucher(db: Db, a: { tenantId: string; userId: string; key: string; code: string }) {\n  const fingerprint = sha256(`POST /v1/vouchers/redeem ${canonicalJson({ code: normalize(a.code) })}`);\n\n  return db.tx(async (tx) => {\n    await tx.query(`SET LOCAL lock_timeout = '2s'`);\n\n    // 1. Claim the key. A concurrent duplicate blocks here on the unique index until we commit or roll back.\n    const claimed = await tx.query(\n      `INSERT INTO idempotency_keys\n         (tenant_id,user_id,operation,key,fingerprint,response_code,response_body)\n       VALUES ($1,$2,'voucher.redeem',$3,$4,0,'null')\n       ON CONFLICT DO NOTHING RETURNING 1`,\n      [a.tenantId, a.userId, a.key, fingerprint]);\n\n    if (claimed.rowCount === 0) {\n      // First request already committed: replay it, or reject a reused key.\n      const prev = await tx.one(\n        `SELECT fingerprint, response_code, response_body FROM idempotency_keys\n         WHERE tenant_id=$1 AND user_id=$2 AND operation='voucher.redeem' AND key=$3`,\n        [a.tenantId, a.userId, a.key]);\n      if (prev.fingerprint !== fingerprint) throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED');\n      return { ...prev, replayed: true };           // route adds Idempotency-Replayed: true\n    }\n\n    // 2. Atomically claim the voucher. Exactly one transaction can flip redeemed_at from NULL.\n    const v = await tx.query(\n      `UPDATE vouchers SET redeemed_by=$1, redeemed_at=now()\n       WHERE code_hash=$2 AND redeemed_at IS NULL AND expires_at > now()\n       RETURNING id, credit_units`,\n      [a.userId, hashCode(a.code)]);\n\n    let code: number, body: unknown;\n    if (v.rowCount === 1) {\n      // 3. Credit in the same transaction.\n      await tx.query(\n        `INSERT INTO credit_ledger (id,user_id,amount,source_type,source_id)\n         VALUES ($1,$2,$3,'voucher',$4)`,\n        [uuidv7(), a.userId, v.rows[0].credit_units, v.rows[0].id]);\n      code = 200; body = { status: 'redeemed', creditUnits: v.rows[0].credit_units };\n    } else {\n      // Not claimable: unknown, expired, or already redeemed. Decide which, without crediting anything.\n      const row = await tx.maybeOne(\n        `SELECT redeemed_by, expires_at FROM vouchers WHERE code_hash=$1`, [hashCode(a.code)]);\n      if (!row) throw new AppError(404, 'VOUCHER_NOT_FOUND');\n      if (row.redeemed_by === a.userId) {\n        code = 200; body = { status: 'already_redeemed' };   // same user, fresh key: safe, no new credit\n      } else if (row.redeemed_by) throw new AppError(409, 'VOUCHER_ALREADY_REDEEMED');\n      else throw new AppError(410, 'VOUCHER_EXPIRED');\n    }\n\n    // 4. Store the response on the key row, then commit.\n    await tx.query(\n      `UPDATE idempotency_keys SET response_code=$1, response_body=$2\n       WHERE tenant_id=$3 AND user_id=$4 AND operation='voucher.redeem' AND key=$5`,\n      [code, body, a.tenantId, a.userId, a.key]);\n    return { response_code: code, response_body: body, replayed: false };\n  });\n}\n```\n\nNotes on the code above:\n- **Business errors and the key.** When the use case throws a 404, 409 or 410, the transaction rolls back, including the key row. A retry with the same key re-evaluates and gets the same answer. If you want the error replayed too, store it and commit instead of throwing.\n- **`lock_timeout`.** If the first request holds the key longer than 2 seconds, the duplicate gets a lock-timeout error. Map it to `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After: 1`. The app should retry that code automatically.\n- **No slow work in the transaction.** No provider call, email or push inside it. If you need a \"credit added\" push or analytics event, write an outbox row in the same transaction.\n- **Rate limit.** Add a per-user limit on this endpoint so people can't brute-force voucher codes.\n\n## Race, step by step\n\nRequest A and its retry B arrive together with the same key:\n1. A inserts the key row. B's insert blocks on the unique index.\n2. A claims the voucher, writes the ledger row and commits.\n3. B's insert is unblocked and does nothing. B reads A's stored response and returns it with `Idempotency-Replayed: true`. The credit was added once.\n\nIf B arrived with a different key, say a second device, the voucher `UPDATE ... WHERE redeemed_at IS NULL` matches zero rows. B gets `already_redeemed` or `409`, and the ledger's unique constraint would block it anyway.\n\n## Client change (mobile app)\n\nGenerate the UUID when the user taps \"Redeem\" and keep it until the action ends. Send the same key on every automatic retry after a timeout. Use backoff with jitter and a cap of 2 or 3 attempts. Retry automatically on a timeout, `503`, `429` and `409 IDEMPOTENCY_IN_PROGRESS`. Don't retry other `4xx` responses. A new tap after a definite failure gets a new key.\n\n## Files to add or change\n\n- `migrations/0007_voucher_redeem_idempotency.sql` — the tables above. It is additive, so no expand/contract steps are needed. A backfill is only needed if vouchers already exist with redeemed state stored elsewhere.\n- `src/modules/vouchers/redeem-voucher.usecase.ts`, plus a route and schema for `POST /v1/vouchers/redeem` (header, body, 200/404/409/410, `Idempotency-Replayed`).\n- `src/shared/idempotency/` — a small reusable helper if other endpoints will need the same key logic.\n- A scheduled job that purges `idempotency_keys` older than the retention window.\n- OpenAPI and error catalog: add `IDEMPOTENCY_KEY_REQUIRED`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `VOUCHER_ALREADY_REDEEMED`, `VOUCHER_EXPIRED` and `VOUCHER_NOT_FOUND`, each with a localized message.\n\n## Tests (real PostgreSQL, written first)\n\nI haven't run any of these, since no code or database exists here.\n- Two concurrent requests with the same key (`Promise.all`): the ledger has one row, both responses are identical, and one has `Idempotency-Replayed`.\n- Two concurrent requests with different keys for the same voucher: one credit, and the other request gets `already_redeemed` or `409`.\n- Sequential replay of the same key returns the stored result.\n- The same key with a different code returns `409 IDEMPOTENCY_KEY_REUSED`, and the new code is not redeemed.\n- Failure after the voucher update, such as an injected error on the ledger insert: everything rolls back, the voucher is still unredeemed, and the key is still free.\n- A different user redeeming an already-redeemed voucher gets `409` and no credit.\n- Expired voucher.\n- A missing key returns `400`."
+}

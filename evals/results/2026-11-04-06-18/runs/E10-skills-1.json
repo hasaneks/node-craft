@@ -1,0 +1,64 @@
+{
+  "id": "E10",
+  "title": "Language change before a queued notification",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 10,
+  "max": 10,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-arch"
+  ],
+  "turns": 8,
+  "seconds": 38,
+  "cost": 0.1441,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Uses the recipient's current preferred_locale read at send time. It rejects the admin's language and the queue-time locale. A snapshot is allowed only as a deliberate, documented exception."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The payload carries notificationId, recipientId, template key, templateVersion and params, with no rendered text and no email address. The answer states this explicitly."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Preferences are loaded fresh and checked at send time, and a disabled preference is recorded as skipped. The push body is generic with no sensitive text, and the app fetches details after authenticating."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "A (notification_id, channel) primary-key guard with INSERT ON CONFLICT, handling of a stuck 'sending' row, and a duplicate-delivery test. It also acknowledges the residual duplicate risk from provider timeouts."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Test 1 is the exact scenario: the user is tr, the approval is queued, the user changes to en, then the job runs, and the assertions check English output and the stored locale."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Using the admin's language",
+        "violated": false,
+        "evidence": "The answer says 'The admin's English doesn't matter' and that the recipient's language decides."
+      },
+      {
+        "item": "Rendering the text when queuing and sending it later",
+        "violated": false,
+        "evidence": "'Don't pre-render. The job carries ids and parameters, never message text.' Rendering happens in the handler at send time."
+      },
+      {
+        "item": "Non-idempotent sending without acknowledging duplicate risk",
+        "violated": false,
+        "evidence": "The answer uses the notification_deliveries guard and a duplicate-delivery test, and it names the provider-timeout duplicate as a residual risk."
+      }
+    ],
+    "summary": "The answer matches the reference on every rubric item and violates none of the forbidden decisions. It uses the recipient's send-time locale, an id-and-key payload, a send-time preference check, an idempotent handler, and a test that changes the locale before the job runs.",
+    "cost": 0.0383412
+  },
+  "answer": "**Short answer:** use English, the user's current language at send time. The admin's English doesn't matter, and neither does the Turkish the user had when the approval happened.\n\nThe working directory has no application code. It only holds the node-craft skills. This answer follows `node-craft-arch/references/notifications.md`, `i18n.md`, `outbox.md` and `queues-workers.md`. Paths below are proposals for a Fastify or NestJS modular monolith with PostgreSQL and BullMQ.\n\n## Decision: which language\n\n1. **The recipient's current `users.preferred_locale`, read when the job runs.** The notification goes to the user, so the user's language decides. The admin only triggers it. The server's default language doesn't enter into it.\n2. **The user changed the setting before delivery, so the latest explicit choice wins.** Sending Turkish after they chose English would ignore what they just said. Neither the event time nor the queue time is the right moment to read it. The send time is.\n3. **Email and push use the same locale.** Resolve it once per job, so one approval can't produce a Turkish email with an English push.\n4. **Exception:** if the notice is legally tied to the language at the time of the event, store a locale snapshot on purpose and document it. An approval notice doesn't need that.\n5. **Fallbacks:**\n   - If the locale is null or unsupported, fall back to the configured default (`en`, or whatever the project's locale policy says).\n   - A regional variant such as `en-GB` resolves to `en`.\n   - A missing key in a supported locale returns the safe generic message in that locale. It is logged and never falls back to a raw string in another language.\n6. **Don't use the device's `push_devices.locale` or the request's `Accept-Language`.** The device locale is informational only. There is no request at send time anyway.\n\n## Job design\n\n**Don't pre-render.** The job carries ids and parameters, never message text in any language:\n\n```ts\n{ v: 1, notificationId, recipientId, template: 'application_approved', templateVersion: 1, params: { applicationId } }\n```\n\nIt carries no email address and no personal data beyond what's needed. The push body is generic and sends an id and a versioned route (`{ v:1, route:'application', id }`). The app fetches the details after authenticating.\n\n**Use an outbox for this flow.** The approval write and the \"tell the user\" intent must not be lost apart:\n\n1. Approval transaction (use case `ApproveApplication`): update `applications.status`, insert the `outbox` row (`topic='notification.application_approved'`, payload above) and the audit row. Commit. No provider call inside the transaction.\n2. The dispatcher claims rows with `FOR UPDATE SKIP LOCKED` and a lease, runs in the worker process, and enqueues to BullMQ with `jobId = outbox.id`. The queue deduplicates only while it still remembers the job, so the database guard in step 3 is what actually holds.\n3. The BullMQ handler does the work, in this order:\n   - Load the user fresh.\n   - Resolve the locale.\n   - Check notification preferences.\n   - Render.\n   - Send.\n   - Record the result.\n\n```sql\n-- the idempotency guard: one row per (notification, channel)\nCREATE TABLE notification_deliveries (\n  notification_id uuid NOT NULL,\n  channel         text NOT NULL CHECK (channel IN ('email','push')),\n  locale          text NOT NULL,              -- what was actually used, for support and audit\n  status          text NOT NULL CHECK (status IN ('sending','sent','skipped','failed')),\n  sent_at         timestamptz,\n  PRIMARY KEY (notification_id, channel)\n);\n```\n\nClaim each channel with `INSERT ... ON CONFLICT DO NOTHING`. If you didn't get the row, someone else has it, so skip. Treat a row stuck in `sending` past a timeout as retryable, because a crash after the claim would otherwise lose the send. Email and push are independent channels, so a push failure doesn't re-send the email on retry.\n\n**Load fresh data in the handler:**\n\n```sql\nSELECT u.preferred_locale, u.time_zone, u.email, u.status,\n       p.transactional_email, p.transactional_push\nFROM users u LEFT JOIN notification_preferences p ON p.user_id = u.id\nWHERE u.id = $1;\n```\n\n```ts\nconst locale = resolveSupported(user.preferred_locale) ?? config.defaultLocale; // en-GB -> en\nconst t = i18n.getFixedT(locale, 'notifications');\n// Intl with locale + user.time_zone for any date in the body\n```\n\n**Push targets** come from `push_devices WHERE user_id = $1` at send time. That honours sign-out and account switching, because a device re-bound to another user stops receiving for the old one. Delete tokens that FCM reports as invalid. Don't put sensitive text in the push body.\n\n**Failures and retries:**\n- Use exponential backoff with jitter and a capped number of attempts.\n- Permanent failures use `UnrecoverableError`: a user that no longer exists, a 4xx from the provider, or a missing template key.\n- Failed jobs must be visible, with an alert on count or age and a controlled retry path.\n- A provider timeout after the send can still duplicate if the email API has no idempotency key. Record that as a residual risk.\n\n**User-facing behaviour:** say that the approval is committed immediately and the notification is eventually consistent, maybe a minute. The approval record is not proof the email arrived.\n\n## Files to add or change\n\n- `src/modules/applications/approve-application.usecase.ts` writes the approval, the outbox row and the audit row in one transaction.\n- `src/shared/outbox/{outbox.repo,dispatcher}.ts` and a worker entry (`start:worker`) that runs the dispatcher.\n- `src/modules/notifications/handlers/application-approved.handler.ts` with the locale resolution above.\n- `src/modules/notifications/{templates,send-email,send-push}.ts`\n- `src/shared/i18n/locales/{tr,en}/{notifications,emails}.json` with the key `application_approved.v1` in both locales. CI fails if a supported locale is missing a key.\n- Migrations: `outbox`, `notification_deliveries`, and `users.preferred_locale` / `users.time_zone` if they don't exist yet. These are additive and follow expand/contract.\n- `PATCH /me` (profile update) is the only place `preferred_locale` changes. It writes straight to PostgreSQL. No cache or queue state may hold an old copy of the locale, so the job always reads the database.\n\n## Tests (real PostgreSQL, and real Redis/BullMQ for the queue path)\n\n1. **The scenario from the question.** The user is `tr`, the admin approves, and the outbox row is queued. The user changes to `en` through the profile endpoint, then the job runs. Assert the email subject and body and the push text are English, and `notification_deliveries.locale = 'en'`.\n2. The reverse (`en` to `tr`), and a null or unsupported locale falling back to the default.\n3. The job payload contains no rendered text and no email address.\n4. The same job delivered twice produces one email and one push, using the `(notification_id, channel)` guard.\n5. A crash after the send and before marking is retried safely. A crash after the claim and before the send is retried after the `sending` timeout.\n6. A rollback of the approval transaction leaves no outbox row, so no notification is sent.\n7. A push after sign-out or an account switch does not reach the old account's device.\n8. If notifications are disabled in the user's preferences, the delivery is recorded as `skipped` and nothing is sent.\n9. A missing template key in a supported locale produces the generic safe message in that locale and a log entry with the request id."
+}

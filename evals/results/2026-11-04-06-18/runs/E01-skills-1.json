@@ -1,0 +1,78 @@
+{
+  "id": "E01",
+  "title": "Plain API with no client",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 12,
+  "max": 14,
+  "percent": 86,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft",
+    "node-craft-init"
+  ],
+  "loadedSkills": [
+    "node-craft-init"
+  ],
+  "turns": 9,
+  "seconds": 77,
+  "cost": 0.2186,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Picks Fastify 5 over NestJS and raw Express, tied to one domain, mostly CRUD and two developers."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Picks Drizzle for visible, typed atomic stock SQL, with a comparison against Prisma, and plans ADRs under docs/adr/."
+      },
+      "R3": {
+        "score": 1,
+        "reason": "Yarn 4 is pinned via packageManager with one lockfile and an immutable install. The Node version is Active LTS (26), but the answer admits it was not verified live and came from the skill's table, so the verification is missing."
+      },
+      "R4": {
+        "score": 1,
+        "reason": "It states no worker, Redis or queue, and that there is no start:worker script. It does not mention Firebase, FCM, Adapty or rn-craft as unneeded, and it mentions Firebase only as an SSO alternative. Railway deploy is added, which is a bit extra."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "TypeBox is the single source for validation, types and OpenAPI via swagger, with explicit response schemas and DTOs instead of entities."
+      },
+      "R6": {
+        "score": 2,
+        "reason": "The slice follows a Red, Green, Refactor order, with integration tests through app.inject on Testcontainers Postgres and a list of test cases."
+      },
+      "R7": {
+        "score": 2,
+        "reason": "Config schema validated at startup (config/env.ts), .env.example, buildApp separate from server.ts listen, and a full scripts list."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Installing or requiring Redis, BullMQ, Firebase, Adapty, FCM or rn-craft",
+        "violated": false,
+        "evidence": "Explicitly no worker, Redis or queue. Firebase appears only as an optional auth alternative that is not adopted."
+      },
+      {
+        "item": "Express directly, or NestJS on the Express adapter",
+        "violated": false,
+        "evidence": "Fastify 5 is chosen, and the answer says 'Never raw Express'."
+      },
+      {
+        "item": "Microservices, CQRS or event sourcing",
+        "violated": false,
+        "evidence": "A single deployable service with modular boundaries. The stock_movements ledger is an audit log, not event sourcing."
+      },
+      {
+        "item": "Inventing business rules beyond the prompt without marking them as assumptions",
+        "violated": false,
+        "evidence": "Assumptions are listed (one author per book, no price, API key auth). The idempotency key, stock ledger and ISBN rules are planned as later slices or design choices, and the open questions are flagged."
+      }
+    ],
+    "summary": "A strong, well-justified Fastify, Drizzle, TypeBox and Testcontainers plan that hits most rubric points. It loses some credit because the Node LTS was not verified live and because it does not explicitly rule out Firebase, FCM, Adapty and rn-craft.",
+    "cost": 0.0515672
+  },
+  "answer": "The working directory has no project in it, only the node-craft skill files under `.claude/skills/`. Nothing below was run or installed. Versions come from the skill's own source table, dated today (2026-11-04), not from a live check of the registries. Treat them as unverified until the first install.\n\n## Assumptions and open questions\n\nAssumptions (I'll proceed on these unless you object):\n- English only, no localization.\n- One author per book, with no price or currency yet.\n- Internal callers only, behind a private network.\n- A single deployable service with no worker, Redis or queue.\n\nQuestions that change the design:\n1. **Auth:** how do callers prove who they are? I assume a static API key per consumer, sent as a bearer token and compared against hashed keys in config. If you'd rather use SSO or Firebase, that changes the auth plugin only.\n2. **Co-authored books:** if a book can have several authors, I need a `book_authors` join table now. Changing it later is a migration, so tell me before slice 1.\n\n## Stack decisions\n\n| Decision | Choice | Reason |\n|---|---|---|\n| Framework | **Fastify 5** with feature plugins, not NestJS | One domain, mostly CRUD, two developers. Nest's DI and modules pay off with many interacting modules, and we have none. Never raw Express. |\n| Language | TypeScript `strict` and `noUncheckedIndexedAccess`, **ESM** (`NodeNext`) | The test runner (Vitest) and the toolchain are ESM-first. One module format everywhere. |\n| Node | **26 (Active LTS since 2026-10-28)** at its latest patch, with **24** as the fallback | Fastify 5's LTS page lists only Node 20 and 22, so I'd run our full suite on 26 in CI first. If anything fails, use 24 and record why in `STACK.md`. The version is pinned in `engines`, `.nvmrc`, CI and Railway. |\n| Package manager | **Yarn 4**, pinned in `packageManager`, `nodeLinker: node-modules`, `yarn install --immutable` in CI | One lockfile. Corepack isn't bundled with Node 25+, so install it explicitly. |\n| Database | **PostgreSQL 18** | Constraints do the integrity work (unique ISBN, `stock >= 0`, foreign keys). PG18 has a native `uuidv7()`. |\n| Data access | **Drizzle** (`drizzle-orm` 0.45.x, `drizzle-kit` 0.31.x, not the 1.0 RC) | Stock changes are atomic SQL expressions (`stock = stock + $1 WHERE stock + $1 >= 0`). Drizzle keeps that visible and typed. Prisma 7 would also work, but it adds a driver adapter and a config file for little gain here. |\n| Validation and OpenAPI | **TypeBox** schemas as the single source, with `@fastify/swagger` | The same schema validates requests, types the handlers and generates OpenAPI. I'd check the type-provider's TypeBox peer version on install. |\n| Logging | pino (built into Fastify), redacting `authorization` | |\n| Tests | **Vitest** with `@testcontainers/postgresql` | Integration tests start their own disposable Postgres, so they don't depend on Compose being up. |\n| Lint and format | ESLint with typescript-eslint `recommendedTypeChecked`, plus Prettier | `no-floating-promises` matters most in an async API. |\n| Deploy | Railway (later), pre-deploy `db:migrate`, health endpoints | I won't start paid resources or a release without your go-ahead. |\n\nI'd write each of these as a short ADR under `docs/adr/`. The set would be 0001 framework, 0002 data access, 0003 Node line and Fastify support, 0004 auth.\n\n## Folder layout\n\n```text\n.nvmrc  .yarnrc.yml  package.json  tsconfig.json  tsconfig.build.json\neslint.config.js  .prettierrc  vitest.config.ts  compose.yaml\ndrizzle.config.ts  .env.example  STACK.md  README.md\ndocs/adr/0001-framework.md ...\nmigrations/                      # drizzle-kit generated SQL, reviewed and committed\nsrc/\n  app.ts                         # buildApp(config, deps): no listen()\n  server.ts                      # load config, buildApp, listen on '::' and PORT, graceful shutdown\n  config/env.ts                  # TypeBox schema, fails fast on bad env\n  shared/\n    errors/app-error.ts          # AppError + stable codes + HTTP mapping + error handler\n    db/client.ts  db/tx.ts       # pool lifecycle, transaction helper\n    http/auth.ts  http/schemas.ts  http/health.ts   # api-key plugin, error/pagination schemas, /livez /readyz\n  modules/\n    authors/  (authors.routes.ts, authors.schemas.ts, application/, infrastructure/authors.queries.ts)\n    books/    (books.routes.ts, books.schemas.ts, application/create-book.ts, domain/isbn.ts, infrastructure/books.queries.ts, db-schema.ts)\n    stock/    (stock.routes.ts, application/adjust-stock.ts, ...)   # slice 3\ntest/                            # container setup, factories, buildTestApp\nscripts/seed-dev.ts  reset-dev.ts   # refuse to run if NODE_ENV=production or the DB host isn't local\n```\n\nBoundaries:\n- Routes handle HTTP only and call use cases.\n- Use cases own the transaction.\n- Domain code (ISBN validation) has no Fastify imports.\n- A module never queries another module's tables. For example, `stock` changes `books.stock_on_hand` through a function that `books` exports.\n\n## Scripts\n\n```json\n\"dev\": \"tsx watch src/server.ts\",\n\"build\": \"tsc -p tsconfig.build.json\",\n\"start\": \"node dist/server.js\",\n\"lint\": \"eslint .\",\n\"format:check\": \"prettier --check .\",\n\"typecheck\": \"tsc --noEmit\",\n\"test:unit\": \"vitest run --project unit\",\n\"test:integration\": \"vitest run --project integration\",\n\"test:e2e\": \"vitest run --project e2e\",\n\"test:ci\": \"yarn lint && yarn format:check && yarn typecheck && yarn test:unit && yarn test:integration && yarn test:e2e\",\n\"db:generate\": \"drizzle-kit generate\",\n\"db:migrate\": \"drizzle-kit migrate\",\n\"db:seed:dev\": \"node dist/scripts/seed-dev.js\",\n\"db:reset:dev\": \"node dist/scripts/reset-dev.js\"\n```\n\n- There is no `start:worker`, since there is no worker.\n- I'd check `drizzle-kit` 0.31 docs before relying on these commands.\n- `drizzle-kit push` is never used outside a throwaway local database.\n- `compose.yaml` runs `postgres:18` with a named volume.\n\n## Data model (migration 0001)\n\n```sql\nCREATE TABLE authors (\n  id          uuid PRIMARY KEY DEFAULT uuidv7(),\n  name        text NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 200),\n  created_at  timestamptz NOT NULL DEFAULT now(),\n  updated_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE books (\n  id            uuid PRIMARY KEY DEFAULT uuidv7(),\n  isbn13        text NOT NULL,\n  title         text NOT NULL CHECK (length(btrim(title)) BETWEEN 1 AND 300),\n  author_id     uuid NOT NULL REFERENCES authors(id) ON DELETE RESTRICT,\n  stock_on_hand integer NOT NULL DEFAULT 0 CHECK (stock_on_hand >= 0),\n  created_at    timestamptz NOT NULL DEFAULT now(),\n  updated_at    timestamptz NOT NULL DEFAULT now(),\n  CONSTRAINT books_isbn13_key UNIQUE (isbn13),\n  CONSTRAINT books_isbn13_format CHECK (isbn13 ~ '^[0-9]{13}$')\n);\nCREATE INDEX books_author_id_idx ON books (author_id);\nCREATE INDEX books_created_idx ON books (created_at, id);   -- cursor pagination\n```\n\nSlice 3 adds an audit ledger and the atomic stock change:\n\n```sql\nCREATE TABLE stock_movements (\n  id uuid PRIMARY KEY DEFAULT uuidv7(),\n  book_id uuid NOT NULL REFERENCES books(id),\n  delta integer NOT NULL CHECK (delta <> 0),\n  reason text NOT NULL,\n  idempotency_key text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  UNIQUE (book_id, idempotency_key)\n);\n\n-- inside one transaction; 0 rows returned means \"missing book\" or \"insufficient stock\"\nUPDATE books SET stock_on_hand = stock_on_hand + $2, updated_at = now()\n WHERE id = $1 AND stock_on_hand + $2 >= 0\nRETURNING stock_on_hand;\n```\n\nIf the update returns no rows, a follow-up `SELECT` tells you whether the book is missing (404) or stock is insufficient (409 `INSUFFICIENT_STOCK`). Retrying with the same `Idempotency-Key` hits the unique constraint and returns the original result.\n\n## First vertical slice: put a book in the catalogue and read it back\n\nEndpoints: `POST /v1/authors`, `POST /v1/books`, `GET /v1/books/:id`.\n\nListing and stock adjustment come after. I'm keeping this slice thin on purpose, because it proves every layer:\n- config, auth and the database\n- a migration and schema validation\n- the error model and OpenAPI\n- logging and an integration test\n\n**TDD order (Red, Green, Refactor):**\n1. A failing integration test through `app.inject` against a Testcontainers Postgres.\n2. A minimal migration and route to make it pass.\n3. Error-path tests, then refactor.\n\n**Test cases:**\n- Create a book and get 201.\n- `GET` returns the same data.\n- A duplicate ISBN returns 409 `ISBN_TAKEN`.\n- An unknown author returns 400 `AUTHOR_NOT_FOUND`.\n- A bad ISBN returns 400 `VALIDATION_FAILED`.\n- A missing key returns 401.\n- An unknown id returns 404 `BOOK_NOT_FOUND`.\n\n`src/app.ts`:\n```ts\nexport async function buildApp(config: Config, deps: { db: Db }) {\n  const app = Fastify({ logger: { level: config.LOG_LEVEL, redact: ['req.headers.authorization'] },\n                        genReqId: () => crypto.randomUUID() });\n  app.setErrorHandler(handleError);            // AppError -> { error: { code, message, requestId } }\n  await app.register(swagger, { openapi: { info: { title: 'Bookshop API', version: '1.0.0' } } });\n  await app.register(authPlugin, { keys: config.API_KEY_HASHES });\n  await app.register(healthRoutes);            // /livez, /readyz (SELECT 1)\n  await app.register(authorsRoutes, { prefix: '/v1', deps });\n  await app.register(booksRoutes, { prefix: '/v1', deps });\n  return app;\n}\n```\n\n`src/modules/books/books.schemas.ts`:\n```ts\nexport const CreateBody = Type.Object({\n  isbn13: Type.String({ pattern: '^[0-9]{13}$' }),\n  title: Type.String({ minLength: 1, maxLength: 300 }),\n  authorId: Type.String({ format: 'uuid' }),\n  initialStock: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })),\n}, { additionalProperties: false });\n\nexport const Book = Type.Object({\n  id: Type.String(), isbn13: Type.String(), title: Type.String(),\n  authorId: Type.String(), stockOnHand: Type.Integer(), createdAt: Type.String({ format: 'date-time' }),\n});\n```\n\n`src/modules/books/application/create-book.ts`:\n```ts\nexport async function createBook(db: Db, input: CreateBookInput): Promise<BookDto> {\n  try {\n    const [row] = await db.insert(books).values({\n      isbn13: input.isbn13, title: input.title.trim(),\n      authorId: input.authorId, stockOnHand: input.initialStock ?? 0,\n    }).returning();\n    return toBookDto(row!);\n  } catch (e) {\n    const pg = pgError(e);                                    // unwraps the driver error\n    if (pg?.constraint === 'books_isbn13_key') throw new AppError('ISBN_TAKEN', 409);\n    if (pg?.code === '23503')                  throw new AppError('AUTHOR_NOT_FOUND', 400);\n    throw e;\n  }\n}\n```\n\n`src/modules/books/books.routes.ts`:\n```ts\napp.post('/books', { schema: { body: CreateBody, response: { 201: Envelope(Book), 400: ErrorBody, 409: ErrorBody } } },\n  async (req, reply) => reply.code(201).send({ data: await createBook(deps.db, req.body) }));\n\napp.get('/books/:id', { schema: { params: IdParams, response: { 200: Envelope(Book), 404: ErrorBody } } },\n  async (req) => ({ data: await getBook(deps.db, req.params.id) }));   // throws BOOK_NOT_FOUND\n```\n\nConstraints stay the source of truth. The ISBN uniqueness comes from the database and is not checked in code first, so concurrent requests can't race.\n\n## Done criteria for the slice\n\n- `yarn test:ci` is green on the pinned Node.\n- The migration applies to an empty database.\n- OpenAPI is generated from the schemas.\n- Logs carry a request id and no secrets.\n- `STACK.md`, the ADRs and `.env.example` are written, with the versions I actually installed and the verification date.\n\n**Next slices:**\n- Slice 2: authors and books `GET` lists with cursor pagination, ordered by `(created_at, id)`.\n- Slice 3: stock adjustment with `Idempotency-Key`.\n- Slice 4: Railway deploy with the pre-deploy migration, once you approve the cost."
+}

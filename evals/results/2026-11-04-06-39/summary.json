@@ -1,0 +1,121 @@
+[
+  {
+    "id": "E01",
+    "title": "Plain API with no client",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 8,
+    "max": 14,
+    "percent": 57,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-init"
+    ],
+    "loadedSkills": [],
+    "turns": 2,
+    "seconds": 79,
+    "cost": 0.1988
+  },
+  {
+    "id": "E01",
+    "title": "Plain API with no client",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 13,
+    "max": 14,
+    "percent": 93,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-init"
+    ],
+    "loadedSkills": [
+      "node-craft-init"
+    ],
+    "turns": 19,
+    "seconds": 104,
+    "cost": 0.3392
+  },
+  {
+    "id": "E01",
+    "title": "Plain API with no client",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 13,
+    "max": 14,
+    "percent": 93,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-init"
+    ],
+    "loadedSkills": [
+      "node-craft-init",
+      "node-craft"
+    ],
+    "turns": 21,
+    "seconds": 136,
+    "cost": 0.3912
+  },
+  {
+    "id": "E13",
+    "title": "Failed migration and worker shutdown during deploy",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 9,
+    "max": 10,
+    "percent": 90,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-ops",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 2,
+    "seconds": 50,
+    "cost": 0.1092
+  },
+  {
+    "id": "E13",
+    "title": "Failed migration and worker shutdown during deploy",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 9,
+    "max": 10,
+    "percent": 90,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-ops",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 7,
+    "seconds": 50,
+    "cost": 0.1646
+  },
+  {
+    "id": "E13",
+    "title": "Failed migration and worker shutdown during deploy",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 9,
+    "max": 10,
+    "percent": 90,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-ops",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 7,
+    "seconds": 42,
+    "cost": 0.1446
+  }
+]

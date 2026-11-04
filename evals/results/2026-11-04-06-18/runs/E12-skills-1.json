@@ -1,0 +1,64 @@
+{
+  "id": "E12",
+  "title": "Old mobile client and a new API change",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 10,
+  "max": 10,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-contract"
+  ],
+  "loadedSkills": [
+    "node-craft-contract"
+  ],
+  "turns": 7,
+  "seconds": 82,
+  "cost": 0.1988,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Describes an expand, migrate, switch, contract phased transition. It keeps `price` in responses and requests for old clients, sets a data-driven sunset window (last 3 minor versions or 180 days), and adds Deprecation/Sunset headers."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Legacy requests with no currency get a server default (tenant default on create, stored currency on update). New clients must send `currency`. The round-trip trap of a legacy edit overwriting a USD product's currency is handled."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Old clients never see `archived`. It is mapped to `inactive` unless an opt-in capability header is sent, and the answer says to treat unknown enum values safely in the new client. It also covers the status write-back and list-filter traps."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Runs `oasdiff breaking` in CI, fails on a stale openapi.json, replays recorded old-client fixtures, and tests legacy requests and responses."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Full expand/contract migration: additive columns, a bidirectional sync trigger, a batched backfill, a NOT VALID constraint, and later drops of `price` and the trigger. Old code runs against the new schema."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Renaming and changing the type in place in one release.",
+        "violated": false,
+        "evidence": "Both `price` and `unitPrice` are kept in parallel and `price` is removed only in a later data-driven contract release."
+      },
+      {
+        "item": "Making `currency` required immediately for all clients.",
+        "violated": false,
+        "evidence": "Legacy clients get a server default. `currency` is required only on the new-client request branch and in the spec after the contract release."
+      },
+      {
+        "item": "Assuming all users update.",
+        "violated": false,
+        "evidence": "It says explicitly that 30% update slowly, sets the sunset by observed legacy traffic, and defaults to legacy behaviour when the capability header is missing."
+      }
+    ],
+    "summary": "The answer covers all five rubric areas thoroughly with a concrete expand/contract plan and old-client protections, and violates none of the forbidden decisions.",
+    "cost": 0.0434932
+  },
+  "answer": "I couldn't check anything against your code. The working directory has only the `.claude/skills/` rule files and no application code. File paths below follow the node-craft layout and need adjusting to your repo. I assume `price` is a number or `numeric` column and `status` is a PostgreSQL enum.\n\n## Decision\n\nShip this inside `/api/v1` as an expand → migrate → switch → contract transition. Don't cut `/api/v2`. All four changes are on one resource, and the skill's versioning rules cover each of them:\n\n- **Rename and type change:** breaking, so keep the old shape next to the new one.\n- **New required request field:** breaking for old clients, so give it a server default until the window closes.\n- **New enum value:** safe only if old clients handle unknown values. You can't assume your last-four-months clients do, so you must not send them `archived`.\n\nRolling back the app never rolls back the database, so every migration step is additive. The old code must run against the new schema.\n\n## Contract behaviour while old clients exist\n\n| Change | Old client (`price`) | New client |\n|---|---|---|\n| Request | Sends `price: 12.5` with no currency. The server accepts it and uses the existing currency on update, or the tenant default on create. | Sends `unitPrice: \"12.50\"` and `currency: \"TRY\"`, both required. |\n| Response | Gets `price` (number) as before. | Gets `unitPrice` and `currency`. It also receives `price` (marked `deprecated`) until the sunset. |\n| `status` | Never sees `archived`. It is served as `inactive`, or whichever existing value is closest. That's a product decision. | Sees `archived` if it sends `X-App-Capabilities: archived-status`. |\n\nUse an opt-in capability header for `archived`, not app-version sniffing. A missing header means legacy behaviour, so a client you forgot about is safe by default. Still log `X-App-Version` for usage tracking.\n\nTwo round-trip traps need handling:\n\n1. **Status write-back.** A legacy client shows an archived product as `inactive` and may PATCH `status: \"inactive\"` back. That would silently unarchive it. Treat a legacy status write equal to the mapped value as a no-op.\n2. **Currency on legacy price edits.** A legacy `price` update must keep the product's stored currency. Never apply the tenant default on update, or a USD product would be re-read as TRY.\n\n## Files\n\n```\nmigrations/0042_products_expand.sql          columns, sync trigger\nmigrations/0043_product_status_archived.sql  enum value, own file, no transaction\nmigrations/0044_backfill_unit_price.sql      or a script/job, batched (see below)\nsrc/modules/products/products.schemas.ts     TypeBox: union request, response, deprecated price\nsrc/modules/products/products.compat.ts      legacy normalise and serialise, capability parsing\nsrc/modules/products/products.routes.ts      wire schemas, Deprecation/Sunset headers\nsrc/modules/products/products.repository.ts  write both columns\nopenapi.json                                 regenerated, committed\nSTACK.md                                     support window, sunset rule\ntests/products.contract.test.ts              legacy, new, archived, round-trip\ntests/fixtures/legacy-client/*.json          recorded old requests and responses\n.github/workflows/ci.yml                     oasdiff step\n```\n\n## Migrations\n\n```sql\n-- 0042_products_expand.sql\nSET lock_timeout = '3s';\nALTER TABLE products\n  ADD COLUMN unit_price numeric(20,6),\n  ADD COLUMN currency   char(3);\n\n-- Old pods still run during the deploy and write only `price`.\n-- The trigger keeps both representations consistent in both directions.\nCREATE FUNCTION products_sync_price() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  IF TG_OP = 'INSERT' OR NEW.price IS DISTINCT FROM OLD.price THEN\n    IF NEW.unit_price IS NULL OR (TG_OP = 'UPDATE' AND NEW.unit_price IS NOT DISTINCT FROM OLD.unit_price) THEN\n      NEW.unit_price := round(NEW.price::numeric, 2);\n      NEW.currency   := COALESCE(NEW.currency, 'TRY');   -- confirm the real default\n    END IF;\n  ELSIF NEW.unit_price IS DISTINCT FROM OLD.unit_price THEN\n    NEW.price := NEW.unit_price::double precision;\n  END IF;\n  RETURN NEW;\nEND $$;\nCREATE TRIGGER products_sync_price BEFORE INSERT OR UPDATE ON products\n  FOR EACH ROW EXECUTE FUNCTION products_sync_price();\n```\n\n```sql\n-- 0043_product_status_archived.sql  (run outside a transaction)\nALTER TYPE product_status ADD VALUE IF NOT EXISTS 'archived';\n```\nIf `status` is `text` with a CHECK instead, drop the CHECK and add the new one as `NOT VALID`, then validate it.\n\n```sql\n-- Backfill: separate operation, batched, resumable. Repeat until 0 rows updated.\nWITH b AS (\n  SELECT id FROM products WHERE unit_price IS NULL\n  ORDER BY id LIMIT 5000 FOR UPDATE SKIP LOCKED)\nUPDATE products p\n   SET unit_price = round(p.price::numeric, 2), currency = 'TRY'\n  FROM b WHERE p.id = b.id;\n```\nCheck what the existing floats actually contain before choosing `round(..., 2)`. Log progress after each batch.\n\nThe contract release comes later (see Timeline) and starts with the `NOT NULL` step:\n```sql\nALTER TABLE products ADD CONSTRAINT products_currency_nn CHECK (currency IS NOT NULL) NOT VALID;\n-- later: VALIDATE CONSTRAINT, then SET NOT NULL, drop the check, drop `price`, drop the trigger\n```\n\n## Code\n\n```ts\n// products.schemas.ts\nconst Decimal  = Type.String({ pattern: '^(0|[1-9][0-9]{0,13})(\\\\.[0-9]{1,6})?$', maxLength: 21 });\nconst Currency = Type.String({ pattern: '^[A-Z]{3}$' });   // plus ISO 4217 allow-list in the use case\n\nexport const CreateProduct = Type.Union([\n  Type.Object({ name: Name, unitPrice: Decimal, currency: Currency, status: Status },\n              { additionalProperties: false }),\n  Type.Object({ name: Name, price: Type.Number({ minimum: 0, maximum: 1e9 }), status: Type.Optional(Status) },\n              { additionalProperties: false, deprecated: true }),   // legacy shape\n]);\n```\nThe branches are mutually exclusive because of `additionalProperties: false`. A new client that forgets `currency` matches neither branch and gets a 400 with field details. In the use case, check currency scale (JPY 0 decimals, TRY 2) and return a stable code such as `PRODUCT_PRICE_SCALE_INVALID`. Never run a decimal string through `Number()`.\n\n```ts\n// products.compat.ts\nexport const caps = (req) =>\n  new Set((req.headers['x-app-capabilities'] ?? '').toString().split(',').map(s => s.trim()));\n\nexport function normalizeCreate(body, tenant) {\n  return 'unitPrice' in body\n    ? { unitPrice: body.unitPrice, currency: body.currency, legacy: false }\n    : { unitPrice: body.price.toFixed(2), currency: tenant.defaultCurrency, legacy: true };\n}\n\nexport function toProductDto(row, c: Set<string>) {\n  const archivedOk = c.has('archived-status');\n  return {\n    id: row.id, name: row.name,\n    unitPrice: row.unit_price,      // pg returns numeric as a string; normalise to the currency scale\n    currency: row.currency,\n    price: Number(row.unit_price),  // deprecated, removed after sunset\n    status: row.status === 'archived' && !archivedOk ? 'inactive' : row.status,\n  };\n}\n```\nThe legacy list filter `status=inactive` should also match archived rows, since the client displays them as inactive.\n\nIn the route, when the request was legacy (the `price` branch, or no capability header), add `Deprecation: true` and a `Sunset:` header. Log `{ legacyPrice, appVersion }` on every product request. Mark `price` as `deprecated: true` in the response schema. A replayed `Idempotency-Key` should compare the raw body hash, not the normalised one.\n\n## Release order\n\n1. **Expand:** migrations 0042 and 0043, then the backfill. Old code is unaffected.\n2. **Server release:** the compatibility layer above, with the schema union, dual-shape responses and the `archived` mapping. The archive feature stays off.\n3. **Client release:** uses `unitPrice` and `currency`, sends the capability header, and treats unknown enum values safely. Start the support-window clock here.\n4. **Enable archiving:** archived products are now safe for every client.\n5. **Observe:** track the share of requests using legacy `price` by `X-App-Version`. Show an update prompt, or force one, on old versions near the end.\n6. **Contract (a later release, data-driven):** remove it when legacy traffic is near zero for 30 days or your minimum supported app version has passed. Drop `price` and the trigger, make `currency` required in the spec, and remove the `price` response field and the legacy branch.\n\nBecause 30% of users update slowly, set the sunset by that data, not a fixed date. Write the rule in `STACK.md`, for example \"last 3 minor versions or 180 days, whichever is longer\".\n\n## Tests and CI\n\n- **Legacy request:** `POST {name, price: 12.5}` returns 201 with both `price` and `unitPrice: \"12.50\"`, and the row has currency `TRY`.\n- **New request:** `POST` without `currency` returns 400 with field details.\n- **Archived mapping:** an archived product returns `inactive` without the capability header and `archived` with it.\n- **Status write-back:** a legacy PATCH with `status: inactive` on an archived product leaves it archived.\n- **Legacy price edit:** a legacy PATCH `price` on a USD product keeps USD.\n- **Migration test:** apply from zero, and apply onto the previous release's schema.\n- **Trigger test:** old-style inserts and updates (price only) keep `unit_price` in sync.\n- **Recorded fixtures:** replay the old-client responses through the old client's handler.\n- **Spec diff:** generate `openapi.json`, fail CI if it is stale, and run `oasdiff breaking` against the last release. The compatible union and the deprecated field should pass. Label the final contract release as breaking.\n\n## Please confirm\n\n- The existing `status` values and which one `archived` should map to for old clients.\n- The real default currency and whether stored prices all share it.\n- Whether the apps already send `X-App-Version`.\n- Whether the current clients ignore unknown response fields."
+}

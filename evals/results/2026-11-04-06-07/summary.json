@@ -1,0 +1,799 @@
+[
+  {
+    "id": "E01",
+    "title": "Plain API with no client",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 11,
+    "max": 14,
+    "percent": 79,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-init"
+    ],
+    "loadedSkills": [],
+    "turns": 4,
+    "seconds": 62,
+    "cost": 0.1775
+  },
+  {
+    "id": "E01",
+    "title": "Plain API with no client",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 13,
+    "max": 14,
+    "percent": 93,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-init"
+    ],
+    "loadedSkills": [
+      "node-craft-init",
+      "node-craft"
+    ],
+    "turns": 19,
+    "seconds": 104,
+    "cost": 0.3265
+  },
+  {
+    "id": "E01",
+    "title": "Plain API with no client",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 13,
+    "max": 14,
+    "percent": 93,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-init"
+    ],
+    "loadedSkills": [
+      "node-craft-init"
+    ],
+    "turns": 9,
+    "seconds": 77,
+    "cost": 0.2259
+  },
+  {
+    "id": "E02",
+    "title": "Complex roles and admin domain",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 6,
+    "max": 12,
+    "percent": 50,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-init"
+    ],
+    "loadedSkills": [],
+    "turns": 2,
+    "seconds": 60,
+    "cost": 0.132
+  },
+  {
+    "id": "E02",
+    "title": "Complex roles and admin domain",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 10,
+    "max": 12,
+    "percent": 83,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-init"
+    ],
+    "loadedSkills": [
+      "node-craft",
+      "node-craft-arch",
+      "node-craft-init"
+    ],
+    "turns": 13,
+    "seconds": 75,
+    "cost": 0.2282
+  },
+  {
+    "id": "E02",
+    "title": "Complex roles and admin domain",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 9,
+    "max": 12,
+    "percent": 75,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-init"
+    ],
+    "loadedSkills": [
+      "node-craft-init",
+      "node-craft-arch"
+    ],
+    "turns": 11,
+    "seconds": 60,
+    "cost": 0.204
+  },
+  {
+    "id": "E03",
+    "title": "Existing backend keeps its decisions",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 13,
+    "max": 14,
+    "percent": 93,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 16,
+    "seconds": 48,
+    "cost": 0.1691
+  },
+  {
+    "id": "E03",
+    "title": "Existing backend keeps its decisions",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 13,
+    "max": 14,
+    "percent": 93,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft",
+      "node-craft-contract"
+    ],
+    "turns": 21,
+    "seconds": 65,
+    "cost": 0.2088
+  },
+  {
+    "id": "E03",
+    "title": "Existing backend keeps its decisions",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 12,
+    "max": 14,
+    "percent": 86,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft",
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft",
+      "node-craft-contract"
+    ],
+    "turns": 23,
+    "seconds": 72,
+    "cost": 0.233
+  },
+  {
+    "id": "E04",
+    "title": "Next.js client integration without mobile dependencies",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 11,
+    "max": 12,
+    "percent": 92,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract"
+    ],
+    "loadedSkills": [],
+    "turns": 3,
+    "seconds": 51,
+    "cost": 0.1141
+  },
+  {
+    "id": "E04",
+    "title": "Next.js client integration without mobile dependencies",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 12,
+    "max": 12,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft-contract"
+    ],
+    "turns": 10,
+    "seconds": 50,
+    "cost": 0.1934
+  },
+  {
+    "id": "E04",
+    "title": "Next.js client integration without mobile dependencies",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 12,
+    "max": 12,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft-contract"
+    ],
+    "turns": 10,
+    "seconds": 53,
+    "cost": 0.1935
+  },
+  {
+    "id": "E05",
+    "title": "Working together with an rn-craft React Native app",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 16,
+    "max": 16,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 19,
+    "seconds": 152,
+    "cost": 0.4118
+  },
+  {
+    "id": "E05",
+    "title": "Working together with an rn-craft React Native app",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 16,
+    "max": 16,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft-contract",
+      "rn-craft-arch",
+      "node-craft-arch"
+    ],
+    "turns": 24,
+    "seconds": 68,
+    "cost": 0.3233
+  },
+  {
+    "id": "E05",
+    "title": "Working together with an rn-craft React Native app",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 16,
+    "max": 16,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft-contract",
+      "rn-craft-arch",
+      "node-craft-arch"
+    ],
+    "turns": 23,
+    "seconds": 79,
+    "cost": 0.3368
+  },
+  {
+    "id": "E06",
+    "title": "Turkish and unsupported locales",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 13,
+    "seconds": 46,
+    "cost": 0.2084
+  },
+  {
+    "id": "E06",
+    "title": "Turkish and unsupported locales",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft-contract"
+    ],
+    "turns": 7,
+    "seconds": 36,
+    "cost": 0.1398
+  },
+  {
+    "id": "E06",
+    "title": "Turkish and unsupported locales",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft-contract"
+    ],
+    "turns": 7,
+    "seconds": 38,
+    "cost": 0.1431
+  },
+  {
+    "id": "E07",
+    "title": "The same write delivered twice at the same time",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 6,
+    "max": 10,
+    "percent": 60,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "loadedSkills": [],
+    "turns": 2,
+    "seconds": 43,
+    "cost": 0.1059
+  },
+  {
+    "id": "E07",
+    "title": "The same write delivered twice at the same time",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "turns": 9,
+    "seconds": 53,
+    "cost": 0.1827
+  },
+  {
+    "id": "E07",
+    "title": "The same write delivered twice at the same time",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft-arch"
+    ],
+    "turns": 6,
+    "seconds": 51,
+    "cost": 0.158
+  },
+  {
+    "id": "E08",
+    "title": "Accessing another tenant's resource",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 8,
+    "max": 8,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "loadedSkills": [],
+    "turns": 2,
+    "seconds": 48,
+    "cost": 0.1147
+  },
+  {
+    "id": "E08",
+    "title": "Accessing another tenant's resource",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 8,
+    "max": 8,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft-arch"
+    ],
+    "turns": 10,
+    "seconds": 60,
+    "cost": 0.1925
+  },
+  {
+    "id": "E08",
+    "title": "Accessing another tenant's resource",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 8,
+    "max": 8,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft-arch"
+    ],
+    "turns": 10,
+    "seconds": 66,
+    "cost": 0.1958
+  },
+  {
+    "id": "E09",
+    "title": "Out-of-order subscription webhooks",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 8,
+    "max": 12,
+    "percent": 67,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 2,
+    "seconds": 45,
+    "cost": 0.1064
+  },
+  {
+    "id": "E09",
+    "title": "Out-of-order subscription webhooks",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 12,
+    "max": 12,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft-arch"
+    ],
+    "turns": 6,
+    "seconds": 46,
+    "cost": 0.1546
+  },
+  {
+    "id": "E09",
+    "title": "Out-of-order subscription webhooks",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 12,
+    "max": 12,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft-arch"
+    ],
+    "turns": 6,
+    "seconds": 48,
+    "cost": 0.1548
+  },
+  {
+    "id": "E10",
+    "title": "Language change before a queued notification",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 8,
+    "max": 10,
+    "percent": 80,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 3,
+    "seconds": 32,
+    "cost": 0.0878
+  },
+  {
+    "id": "E10",
+    "title": "Language change before a queued notification",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft-arch"
+    ],
+    "turns": 8,
+    "seconds": 35,
+    "cost": 0.137
+  },
+  {
+    "id": "E10",
+    "title": "Language change before a queued notification",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 9,
+    "max": 10,
+    "percent": 90,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 7,
+    "seconds": 34,
+    "cost": 0.1386
+  },
+  {
+    "id": "E11",
+    "title": "Account switch and an old push token",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 9,
+    "max": 10,
+    "percent": 90,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "loadedSkills": [],
+    "turns": 2,
+    "seconds": 54,
+    "cost": 0.1208
+  },
+  {
+    "id": "E11",
+    "title": "Account switch and an old push token",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft",
+      "node-craft-arch"
+    ],
+    "turns": 11,
+    "seconds": 100,
+    "cost": 0.2728
+  },
+  {
+    "id": "E11",
+    "title": "Account switch and an old push token",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-arch",
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft-arch"
+    ],
+    "turns": 6,
+    "seconds": 58,
+    "cost": 0.1649
+  },
+  {
+    "id": "E12",
+    "title": "Old mobile client and a new API change",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 9,
+    "max": 10,
+    "percent": 90,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract"
+    ],
+    "loadedSkills": [],
+    "turns": 3,
+    "seconds": 55,
+    "cost": 0.1189
+  },
+  {
+    "id": "E12",
+    "title": "Old mobile client and a new API change",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft-contract",
+      "node-craft-arch"
+    ],
+    "turns": 10,
+    "seconds": 82,
+    "cost": 0.2088
+  },
+  {
+    "id": "E12",
+    "title": "Old mobile client and a new API change",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 10,
+    "max": 10,
+    "percent": 100,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-contract"
+    ],
+    "loadedSkills": [
+      "node-craft-contract"
+    ],
+    "turns": 7,
+    "seconds": 85,
+    "cost": 0.2036
+  },
+  {
+    "id": "E13",
+    "title": "Failed migration and worker shutdown during deploy",
+    "arm": "baseline",
+    "rep": 1,
+    "status": "graded",
+    "score": 7,
+    "max": 10,
+    "percent": 70,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-ops",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [],
+    "turns": 2,
+    "seconds": 50,
+    "cost": 0.119
+  },
+  {
+    "id": "E13",
+    "title": "Failed migration and worker shutdown during deploy",
+    "arm": "skills",
+    "rep": 1,
+    "status": "graded",
+    "score": 9,
+    "max": 10,
+    "percent": 90,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-ops",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft-ops",
+      "node-craft-arch"
+    ],
+    "turns": 11,
+    "seconds": 58,
+    "cost": 0.1854
+  },
+  {
+    "id": "E13",
+    "title": "Failed migration and worker shutdown during deploy",
+    "arm": "skills",
+    "rep": 2,
+    "status": "graded",
+    "score": 9,
+    "max": 10,
+    "percent": 90,
+    "violations": [],
+    "expectedSkills": [
+      "node-craft-ops",
+      "node-craft-arch"
+    ],
+    "loadedSkills": [
+      "node-craft-ops",
+      "node-craft-arch"
+    ],
+    "turns": 11,
+    "seconds": 53,
+    "cost": 0.1849
+  }
+]

@@ -1,0 +1,70 @@
+{
+  "id": "E13",
+  "title": "Failed migration and worker shutdown during deploy",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 10,
+  "max": 10,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-ops",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-ops"
+  ],
+  "turns": 9,
+  "seconds": 39,
+  "cost": 0.1555,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Pre-deploy on one service only (API), non-zero exit stops the deploy, advisory lock plus lock_timeout, and explicitly rejects running migrations in every start command."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Nullable column added first, batched resumable backfill, CHECK ... NOT VALID then VALIDATE, then SET NOT NULL, with lock_timeout and code that writes the column. This is the expected expand/backfill/validate pattern."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Separate /health/live (no external checks) and /health/ready (SELECT 1 with a timeout, 503 on shutdown). Rejects the always-200 idea and keeps the readiness path as the Railway healthcheck."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "worker.close() on SIGTERM with a timeout below the draining time, a draining-seconds setting, idempotent handlers keyed on a business key or provider idempotency key, a shutdown test, and residual risk noted."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Runbook covers stop and inspect state, a forward fix or restore with approval, a backup check, and states that an app rollback is not a database rollback. It also tells them to inspect yesterday's partial state and to use a runbook. It is slightly light on explicitly reporting the failure, but it does not hide it."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Running migrations in every service's start command",
+        "violated": false,
+        "evidence": "Explicitly rejected; migrations go in a pre-deploy step on the API service only."
+      },
+      {
+        "item": "Faking a successful health check",
+        "violated": false,
+        "evidence": "Says the always-200 check removes the gate that stops a bad release, and keeps /health/ready honest."
+      },
+      {
+        "item": "Treating application rollback as a database rollback",
+        "violated": false,
+        "evidence": "States 'Rolling back the app does not roll back the database'."
+      },
+      {
+        "item": "Hiding the failure",
+        "violated": false,
+        "evidence": "Runbook says to record the state the failure left and to investigate yesterday's incident. It also flags unverified Railway details."
+      }
+    ],
+    "summary": "The answer covers all five rubric areas thoroughly and correctly, includes no forbidden decisions, and is only slightly light on explicit failure reporting.",
+    "cost": 0.0402492
+  },
+  "answer": "The working directory has no application code, only the node-craft skill files. So this is advice based on those rules and your description, not a review of your repo. I did not create or edit files or run commands.\n\n## Don't do either suggestion\n\n**Migrations in the start command of both services.** This is the cause of the failure, not a fix for it.\n- Every replica and every restart would run the migration. That includes a worker restart caused by a crash or by Railway's SIGTERM, and a restart is exactly what cut off your email jobs.\n- Two services would race on the same DDL.\n- Each start would take locks on a 20M-row table while the old version is still serving traffic.\n- A failed migration would crash-loop the service instead of stopping the release.\n\n**A health check that always returns 200.** It makes Railway promote a version whose schema or dependencies are broken. Railway only checks health during a deploy, so you would lose the one gate that stops a bad release. Keep `/health/ready` honest.\n\n## What to do\n\n### 1. Run migrations once per release, in the pre-deploy step\n\n- Set the pre-deploy command on **one service only** (the API) to `yarn db:migrate`. The worker has no migration command.\n- A non-zero exit stops the deploy, so no traffic goes to a version whose migration failed.\n- Add a PostgreSQL advisory lock as a second guard:\n\n```ts\n// scripts/migrate.ts\nawait client.query('SET lock_timeout = \\'5s\\'');\nconst { rows } = await client.query('SELECT pg_try_advisory_lock(727274) AS ok');\nif (!rows[0].ok) { console.error('another migration is running'); process.exit(1); }\ntry { await runMigrations(); } finally { await client.query('SELECT pg_advisory_unlock(727274)'); }\n```\n\n- Pre-deploy runs in its own container, with no retry and no volumes. That suits short, fast DDL only.\n\n### 2. Split the NOT NULL column into releases\n\nAdding `NOT NULL` on 20M rows in one migration does a full scan or rewrite under a heavy lock. The old code also doesn't write the column yet, so it breaks mid-deploy. Use expand, backfill, switch, contract, one release per step.\n\n**Release 1 (pre-deploy migration, instant):**\n\n```sql\nSET lock_timeout = '5s';\nALTER TABLE orders ADD COLUMN region text;   -- nullable, no default\n```\n\nRelease 1 also ships code that always writes `region`.\n\n**Backfill (a separate, resumable operation, not a deploy step):**\n\n```sql\n-- repeat until 0 rows updated; log progress; sleep briefly between batches\nUPDATE orders SET region = 'unknown'\nWHERE id IN (\n  SELECT id FROM orders WHERE region IS NULL ORDER BY id LIMIT 5000\n);\n```\n\nRun it as `yarn db:backfill:region`, a script or one-off job with a batch size and a progress log line. It must be safe to stop and restart.\n\n**Release 2 (after the backfill finishes and the code release is live):**\n\n```sql\nSET lock_timeout = '5s';\nALTER TABLE orders ADD CONSTRAINT orders_region_nn CHECK (region IS NOT NULL) NOT VALID;\n```\n\n**Release 3 (contract):**\n\n```sql\nALTER TABLE orders VALIDATE CONSTRAINT orders_region_nn;  -- scans, but only a light lock\nALTER TABLE orders ALTER COLUMN region SET NOT NULL;      -- uses the validated check, no full scan\nALTER TABLE orders DROP CONSTRAINT orders_region_nn;\n```\n\nAlways set `lock_timeout`, so a blocked `ALTER` fails fast instead of queueing every query behind it. Every migration must also run against the code version before it.\n\nAdd a CI gate that applies the migrations to an empty database and to a database at the previous release's schema. Before any step that could lose data, confirm a recent backup and get explicit approval.\n\n### 3. Fix the worker shutdown\n\nJobs were cut off because the worker was killed mid-job. Three changes fix that:\n\n```ts\n// src/worker.ts\nconst shutdown = async (signal: string) => {\n  logger.info({ signal }, 'worker shutting down');\n  const timer = setTimeout(() => process.exit(1), 50_000).unref(); // below the draining time\n  try {\n    await worker.close();   // stop taking jobs, let active ones finish\n    await pool.end();\n    await redis.quit();\n  } finally { clearTimeout(timer); }\n  process.exit(0);\n};\nprocess.once('SIGTERM', () => void shutdown('SIGTERM'));\nprocess.once('SIGINT', () => void shutdown('SIGINT'));\n```\n\n- Set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` above your longest email job step, for example 60. Keep the app's own timeout shorter, as above.\n- Make every handler idempotent, because BullMQ delivery is at least once. Use a unique `(job_type, business_key)` row in Postgres, or the email provider's idempotency key. Then a job interrupted at SIGKILL and retried can't send a second email.\n- Set the stalled-job settings to match real job length.\n- Test it: start a job, send SIGTERM, and check it either finishes or is retried exactly once.\n- If the provider has no idempotency key, a timeout after send can still duplicate. Record that as a residual risk.\n\n### 4. Keep health checks honest\n\n- `/health/live` checks nothing external.\n- `/health/ready` runs `SELECT 1` with a 1s timeout, and returns 503 once shutdown has started.\n- The worker is only unready when Redis is down. It doesn't need a DB-dependent check beyond that.\n- Set the Railway healthcheck path to `/health/ready`. Set the deploy timeout to something realistic instead of making the check pass.\n- Add uptime alerts separately, since Railway doesn't monitor after the deploy.\n\n## Files I would add or change\n\n| File | Change |\n|---|---|\n| `package.json` | `db:migrate` (with advisory lock), `db:backfill:<name>`, `start:api`, `start:worker` |\n| `scripts/migrate.ts` | Lock, `lock_timeout`, non-zero exit on failure |\n| `scripts/backfill-<name>.ts` | Batched, logged, resumable |\n| `migrations/*_add_<col>.sql`, `*_check_<col>.sql`, `*_validate_<col>.sql` | One file per release step |\n| `src/worker.ts` | Graceful shutdown as above |\n| `src/jobs/email.ts` | Idempotency guard keyed on business id |\n| `src/health.ts` | Honest `/health/ready`, flips to 503 on SIGTERM |\n| Railway config | API: pre-deploy `yarn db:migrate`, start `node dist/server.js`, healthcheck `/health/ready`. Worker: start `node dist/worker.js`, no pre-deploy, bounded restart-on-failure retries, draining time 60s |\n| `.github/workflows/ci.yml` | Migration-from-previous-schema job, integration tests on real Postgres and Redis |\n| `docs/runbooks/failed-release.md` | What to do when a migration fails (see below) |\n\nRailway's `railway.json` and `railway.toml` are deprecated and stop working on 2026-12-01. The replacement is `.railway/railway.ts`, applied with `railway config plan` and then `railway config apply`. Check the current docs before writing the config.\n\n## Runbook for a failed migration\n\nStop and don't rerun until it passes. Record what state it left: the transaction rolled back, or an `INVALID` index remains. Then choose a forward fix or a restore, with approval. Rolling back the app does not roll back the database, so each release should state which of the old code, a forward fix, or a restore applies.\n\nFor yesterday's incident, check whether the half-applied `ALTER` left partial state. If a `CREATE INDEX CONCURRENTLY` was involved, drop any `INVALID` index before retrying.\n\nI did not check the live Railway docs today. Verify the current pre-deploy and draining behaviour before relying on the details above."
+}

@@ -1,0 +1,106 @@
+diff --git a/skills/rn-craft-arch/references/data.md b/skills/rn-craft-arch/references/data.md
+index bd9ac64..c622a58 100644
+--- a/skills/rn-craft-arch/references/data.md
++++ b/skills/rn-craft-arch/references/data.md
+@@ -3,19 +3,29 @@
+ ## Base API
+ 
+ - One `createApi` in `src/app/store/api.ts`; features add endpoints with `injectEndpoints`.
+-- A custom `baseQuery` around `fetchBaseQuery` that: sets the base URL from config, adds the auth header, applies a
+-  timeout (`timeout` option or `AbortController`), maps every failure to one typed error:
++- A custom `baseQuery` around `fetchBaseQuery` that: sets the base URL from config, adds the auth header and
++  `X-App-Locale` (the active i18next language), applies a timeout (`timeout` option or `AbortController`), maps every
++  failure to one typed error:
+ 
+ ```ts
+ type ApiError =
+-  | { kind: 'network' }                     // offline, DNS, timeout
+-  | { kind: 'unauthorized' }                // 401 after refresh failed
+-  | { kind: 'forbidden' }
+-  | { kind: 'notFound' }
+-  | { kind: 'validation'; fields: Record<string, string> } // map to form fields
+-  | { kind: 'server'; status: number; requestId?: string };
++  | { kind: 'network' }                                         // offline, DNS, timeout
++  | { kind: 'unauthorized'; code: string; requestId?: string }  // 401 after refresh failed
++  | { kind: 'forbidden'; code: string; requestId?: string }
++  | { kind: 'notFound'; code: string; requestId?: string }
++  | { kind: 'validation'; code: string; message: string; fields: Record<string, { code: string; message: string }>; requestId?: string }
++  | { kind: 'conflict'; code: string; message: string; retryAfter?: number; requestId?: string } // 409
++  | { kind: 'rateLimited'; code: string; retryAfter?: number; requestId?: string }              // 429
++  | { kind: 'server'; status: number; code?: string; retryAfter?: number; requestId?: string };
+ ```
+ 
++- If the backend sends `{ error: { code, message, details? }, locale, requestId }` (the node-craft default), map from
++  it: `status` picks the kind, `error.code` is kept as is, `details[].field` becomes the key of `fields`, `requestId`
++  comes from the body or the `X-Request-Id` header, and `Retry-After` becomes `retryAfter` in seconds. Screens branch on
++  `kind` and `code`, never on `message`.
++- Validation errors go into the form: `for (const [field, e] of Object.entries(error.fields)) setError(field, {
++  type: e.code, message: e.message })`. The backend's message is already in the user's language.
++
+ - Request/response types come from the API contract (OpenAPI → generated types, or hand-written). Types do not
+   validate data: parse the responses the app cannot trust (external, versioned, critical) with Zod at the boundary.
+ - RTK Query cache is the source of server data. Derive views with `selectFromResult` or selectors; do not copy the
+@@ -56,7 +66,9 @@ Then opt in per endpoint with `refetchOnFocus` / `refetchOnReconnect` where fres
+ ## Pagination
+ 
+ Infinite queries (`build.infiniteQuery`) or a page-merge `serializeQueryArgs` + `merge` + `forceRefetch`. A page error
+-keeps the loaded list and shows retry at the end.
++keeps the loaded list and shows retry at the end. Type the endpoint after the backend's list shape: with
++`{ data, meta: { nextCursor, hasMore } }`, `getNextPageParam` returns `meta.nextCursor` (null ends the list) and the
++screen reads `pages.flatMap((p) => p.data)`; use `transformResponse` only to adapt a different shape in one place.
+ 
+ ## Sign-out and account switch
+ 
+diff --git a/skills/rn-craft-arch/references/firebase-notifications.md b/skills/rn-craft-arch/references/firebase-notifications.md
+index edb689f..f327e9b 100644
+--- a/skills/rn-craft-arch/references/firebase-notifications.md
++++ b/skills/rn-craft-arch/references/firebase-notifications.md
+@@ -26,8 +26,11 @@ collection are off in development builds so test traffic never reaches productio
+ 
+ ## Push messaging
+ 
+-- Token: request notification permission through the soft flow, then `getToken()`; send it to the backend with the
+-  user id; update on `onTokenRefresh`; remove the mapping on sign-out.
++- Token: request notification permission through the soft flow, then `getToken()`; register it with the backend
++  for this app installation (for example `PUT /me/devices/{installationId}` with the token). The backend takes the
++  user from the verified ID token, never from a `userId` in the body. Update on `onTokenRefresh`; remove the mapping
++  on sign-out (`DELETE /me/devices/{installationId}`) before `auth.signOut()`. The unregister can fail offline; the
++  backend re-binds the installation when the next account registers, so do not block sign-out on it.
+ - Delivery and display are separate: FCM delivers; when the app is in the foreground FCM does not show anything, so
+   display it yourself (in-app banner, or Notifee if rich local notifications are needed; justify the extra package).
+ - Handle all three entries: foreground (`onMessage`), background tap (`onNotificationOpenedApp`), cold start
+diff --git a/skills/rn-craft-arch/references/i18n.md b/skills/rn-craft-arch/references/i18n.md
+index dd31144..6e8ea18 100644
+--- a/skills/rn-craft-arch/references/i18n.md
++++ b/skills/rn-craft-arch/references/i18n.md
+@@ -34,7 +34,14 @@ directional icons (back arrows), not logos or media controls.
+ ## Language change in the app
+ 
+ Through the language bottom sheet (`rn-craft` → `references/patterns.md`): save to MMKV, `i18n.changeLanguage`, UI
+-updates without restart (except RTL direction changes). Tell the backend if it localises push or emails.
++updates without restart (except RTL direction changes).
++
++The backend learns the language two ways:
++
++- Every request sends `X-App-Locale` with the active language (set in the base query), so errors and messages come
++  back in it. The header does not change the saved profile on the server.
++- When the user picks a language, also update the profile (for example `PATCH /me { preferredLocale }`) so push and
++  email sent later use it. If the request fails, keep the local choice and retry the update later.
+ 
+ ## CI
+ 
+diff --git a/skills/rn-craft-arch/references/monetization.md b/skills/rn-craft-arch/references/monetization.md
+index cb6f13b..b14688b 100644
+--- a/skills/rn-craft-arch/references/monetization.md
++++ b/skills/rn-craft-arch/references/monetization.md
+@@ -5,7 +5,9 @@
+ If the `adapty-skills` plugin is installed, use its integration skill for SDK setup; the rules below still apply.
+ 
+ - One `purchases` service: activate once at startup with the environment's public key; `identify(userId)` after
+-  sign-in and `logout()` in `resetSession()`, so the Adapty profile follows the account.
++  sign-in and `logout()` in `resetSession()`, so the Adapty profile follows the account. `userId` is the backend
++  user id (from `GET /me`), not the Firebase uid or the email, so Adapty webhooks map straight to the backend user.
++  Premium access the app enforces comes from the backend; the SDK profile is for paywall display.
+ - Premium access comes from the profile's access level (`profile.accessLevels.premium?.isActive`), refreshed on
+   launch, on `AppState` active and from the profile-update listener. If the backend gates content, it verifies the
+   entitlement too (Adapty webhooks / server API). Never a local boolean alone.

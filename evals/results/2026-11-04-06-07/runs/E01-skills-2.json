@@ -1,0 +1,78 @@
+{
+  "id": "E01",
+  "title": "Plain API with no client",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 13,
+  "max": 14,
+  "percent": 93,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft",
+    "node-craft-init"
+  ],
+  "loadedSkills": [
+    "node-craft-init"
+  ],
+  "turns": 9,
+  "seconds": 77,
+  "cost": 0.2259,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Picks Fastify 5 and ties it to two domains, mostly CRUD, two developers; explicitly rejects NestJS and Express."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Chooses Drizzle with a workload reason (atomic stock update, team reads SQL) and records each decision as an ADR in docs/adr/."
+      },
+      "R3": {
+        "score": 1,
+        "reason": "Policy is Active LTS from nodejs.org with strict TS, and Yarn 4 is pinned with one lockfile. But the answer says it did not check the network, so the LTS version was not verified on the day."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "States there is no worker, Redis, BullMQ, CQRS or microservices because load is tiny and nothing is asynchronous."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "TypeBox gives validation, serialization, TS types and OpenAPI from one schema, and the route maps results to response shapes rather than entities."
+      },
+      "R6": {
+        "score": 2,
+        "reason": "Gives a test-first plan with red/green/refactor and Testcontainers PostgreSQL integration tests, including a concurrency test."
+      },
+      "R7": {
+        "score": 2,
+        "reason": "Zod config validated at startup, .env.example, buildApp in app.ts separate from listen in server.ts, and a full set of standard scripts."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Installing or requiring Redis, BullMQ, Firebase, Adapty, FCM or rn-craft",
+        "violated": false,
+        "evidence": "These are explicitly excluded; no worker, Redis or queue. The only mention of node-craft skills is as reference docs, not rn-craft."
+      },
+      {
+        "item": "Express directly, or NestJS on the Express adapter",
+        "violated": false,
+        "evidence": "Uses Fastify 5 and says 'Never Express'."
+      },
+      {
+        "item": "Microservices, CQRS or event sourcing",
+        "violated": false,
+        "evidence": "Modular monolith. The stock_movements ledger is an audit log, not event sourcing."
+      },
+      {
+        "item": "Inventing business rules beyond the prompt without marking them as assumptions",
+        "violated": false,
+        "evidence": "Currency, ISBN, stock ledger and auth are listed under 'Assumptions'. Idempotency-Key and error conventions are flagged as to be confirmed against the contract, though some details such as the Idempotency-Key requirement are not marked as assumptions."
+      }
+    ],
+    "summary": "This is a strong answer that meets nearly every rubric item. Its one weakness is that it did not verify the Active LTS Node version on the day.",
+    "cost": 0.050469200000000006
+  },
+  "answer": "The working directory has no project in it, only `.claude/skills/node-craft*`. This is a greenfield setup, and I followed `node-craft-init`. I did not run commands or check the network, so every version below has to be verified on day one.\n\n## Assumptions and one blocking question\n\n- One currency per deployment. Prices are stored as integer minor units, with a `currency` column kept for later.\n- The ISBN is the business key and is 13 digits.\n- Stock is a counter plus an audit ledger. There is no reservation or order flow yet.\n- A single service handles the few hundred requests per minute, so there is no worker, Redis, queue or outbox.\n- **Blocking question: who calls this API, and how are they identified?** \"Internal\" has no identity in the brief. I would start with one static API key per calling system, sent as `Authorization: Bearer`, compared in constant time and loaded from config. The calling system's name would be logged for audit. If you already have SSO or an internal gateway, that replaces it. I would not ship the API with no auth at all.\n\n## Stack decisions\n\n| Decision | Choice | Reason | Revisit when |\n|---|---|---|---|\n| Runtime | Node.js Active LTS at its latest patch, TypeScript `strict`, ESM | I'd look up the current Active LTS on nodejs.org and use that, not a Current line. I'd also check that Fastify, Drizzle and Vitest support it. It could be 24 or 26, so don't take it from memory. | Each LTS change |\n| Package manager | Yarn 4, pinned in `packageManager`, `nodeLinker: node-modules`, `yarn install --immutable` in CI | One lockfile and the same Yarn locally and in CI. | Never |\n| Framework | **Fastify 5** with feature plugins | Two domains (catalog and stock), mostly CRUD, two developers. NestJS's DI and decorators buy nothing here. Never Express. | More than about 8 modules calling each other, or a second team |\n| Validation and OpenAPI | TypeBox schemas, `@fastify/type-provider-typebox`, `@fastify/swagger` | One schema gives request validation, response serialization, TS types and the OpenAPI document. | — |\n| Database | PostgreSQL | Relational data with constraints. | — |\n| Data access | **Drizzle** and drizzle-kit migrations, with no `db push` outside a scratch DB | The one interesting operation is an atomic stock update, and I want to see the SQL. The team reads SQL. Prisma would also work. | Queries turn into plain CRUD and generated-client ergonomics matter more |\n| Tests | Vitest with unit, integration and e2e projects. Integration tests use Testcontainers PostgreSQL. | They don't depend on the Compose stack being up. | — |\n| Logging | pino with a request id and redaction of `authorization` | Built into Fastify. | — |\n| Config | Zod schema parsed once at startup into a frozen object | Fails fast and lists variable names only, never values. | — |\n| Architecture | Modular monolith. No worker, Redis, BullMQ, CQRS or microservices. | Load is tiny and nothing is asynchronous. | A concrete need, recorded as an ADR |\n\nEach row becomes a short ADR in `docs/adr/`, in the form need, options, decision, reasons, revisit-when. `STACK.md` records the exact pinned versions and the verification date.\n\nContract conventions, to confirm against `node-craft-contract` before coding the first route:\n- Routes are under `/v1`.\n- Errors use `{ error: { code, message, requestId } }` with stable codes: `VALIDATION_ERROR` (400), `UNAUTHENTICATED` (401), `BOOK_NOT_FOUND` (404), `ISBN_TAKEN` and `INSUFFICIENT_STOCK` (409).\n- Lists use cursor pagination, never offsets.\n- Timestamps are ISO-8601 UTC.\n- Money is integer minor units.\n\n## Folder layout\n\n```text\n.nvmrc  .yarnrc.yml  package.json  tsconfig.json  tsconfig.build.json\neslint.config.js  .prettierrc  vitest.config.ts  drizzle.config.ts\ncompose.yaml  .env.example  STACK.md  README.md\ndocs/adr/0001-framework.md  0002-data-access.md  0003-modular-monolith.md  0004-auth.md\nmigrations/0000_init.sql\nsrc/\n  app.ts                  # buildApp({config, db}) – no listen()\n  server.ts               # loadConfig, build, listen 0.0.0.0:PORT, graceful shutdown\n  config/env.ts\n  shared/\n    errors/               # AppError, codes, central HTTP mapping\n    db/                   # pool lifecycle, Db type, schema.ts\n    http/                 # api-key auth plugin, request id, error/pagination schemas\n    logger/\n  modules/\n    health/health.routes.ts            # /healthz (liveness), /readyz (SELECT 1)\n    authors/   authors.routes.ts  authors.schemas.ts  application/  infrastructure/\n    books/     books.routes.ts  books.schemas.ts\n               application/ create-book.ts get-book.ts\n               domain/      isbn.ts\n               infrastructure/ books.queries.ts\n    stock/     stock.routes.ts  stock.schemas.ts\n               application/ adjust-stock.ts\n               domain/      apply-delta.ts   # pure rule\ntest/ setup/containers.ts  factories.ts\nscripts/ seed-dev.ts reset-dev.ts   # refuse if NODE_ENV=production or non-local host\n```\n\nThe module rules:\n- Routes only do HTTP.\n- Use cases own the transaction.\n- `domain/` has no framework imports.\n- `stock` does not write `books` tables. It calls the books read function.\n\n## Scripts\n\n```json\n\"dev\": \"tsx watch src/server.ts\",\n\"build\": \"tsc -p tsconfig.build.json\",\n\"start\": \"node dist/server.js\",\n\"lint\": \"eslint .\",\n\"format:check\": \"prettier --check .\",\n\"typecheck\": \"tsc --noEmit\",\n\"test:unit\": \"vitest run --project unit\",\n\"test:integration\": \"vitest run --project integration\",\n\"test:e2e\": \"vitest run --project e2e\",\n\"test:ci\": \"yarn lint && yarn typecheck && yarn test:unit && yarn test:integration && yarn test:e2e\",\n\"db:generate\": \"drizzle-kit generate\",\n\"db:migrate\": \"drizzle-kit migrate\",\n\"openapi:export\": \"tsx scripts/export-openapi.ts\",\n\"db:seed:dev\": \"node dist/scripts/seed-dev.js\",\n\"db:reset:dev\": \"node dist/scripts/reset-dev.js\"\n```\n\n- There is no `start:worker`, because there is no worker.\n- Before scripting `db:migrate`, I'd check what drizzle-kit does in the installed version.\n- `compose.yaml` runs PostgreSQL at the production major version with a named volume.\n- `.env.example` contains `NODE_ENV`, `PORT`, `DATABASE_URL`, `DB_POOL_MAX`, `LOG_LEVEL` and `API_KEYS`, with safe samples only.\n\n## First vertical slice: books, authors and stock\n\n**Endpoints**\n- `POST /v1/authors`\n- `POST /v1/books` (title, isbn, price, `authorIds`; stock starts at 0)\n- `GET /v1/books/{id}` (includes authors and `stock.quantity`)\n- `POST /v1/books/{id}/stock-adjustments` (requires an `Idempotency-Key` header)\n\nThe adjustment is the part that can corrupt data. It is where a double click or a retry would miscount, so it is in the first slice and not deferred.\n\n**Skeleton first.** Config schema, `buildApp`, the health routes, the error handler, the auth plugin and one Testcontainers integration test that boots the app and hits `/readyz`. Then the slice goes through red, green, refactor.\n\n**Migration `0000_init.sql`**\n\n```sql\nCREATE TABLE authors (\n  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  name       text NOT NULL CHECK (length(btrim(name)) > 0),\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE books (\n  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  isbn        text NOT NULL UNIQUE CHECK (isbn ~ '^[0-9]{13}$'),\n  title       text NOT NULL CHECK (length(btrim(title)) > 0),\n  price_minor integer NOT NULL CHECK (price_minor >= 0),\n  currency    text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),\n  created_at  timestamptz NOT NULL DEFAULT now(),\n  updated_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE book_authors (\n  book_id   uuid NOT NULL REFERENCES books(id) ON DELETE CASCADE,\n  author_id uuid NOT NULL REFERENCES authors(id) ON DELETE RESTRICT,\n  position  smallint NOT NULL DEFAULT 0,\n  PRIMARY KEY (book_id, author_id)\n);\nCREATE INDEX book_authors_author_idx ON book_authors (author_id);\n\nCREATE TABLE book_stock (\n  book_id    uuid PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,\n  quantity   integer NOT NULL DEFAULT 0 CHECK (quantity >= 0),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE stock_movements (\n  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  book_id         uuid NOT NULL REFERENCES books(id) ON DELETE CASCADE,\n  delta           integer NOT NULL CHECK (delta <> 0),\n  reason          text NOT NULL CHECK (reason IN ('receipt','sale','return','correction')),\n  idempotency_key text NOT NULL,\n  created_at      timestamptz NOT NULL DEFAULT now(),\n  UNIQUE (book_id, idempotency_key)\n);\nCREATE INDEX stock_movements_book_idx ON stock_movements (book_id, created_at DESC);\n```\n\n- The `CHECK (quantity >= 0)` constraint is the backstop. The use case enforces the same rule first so it can return a proper 409.\n- `create-book` inserts the book, its `book_stock` row (quantity 0) and the `book_authors` rows in one transaction. It maps the unique-violation on `isbn` to `ISBN_TAKEN`, and an unknown author to a 400 or 404 with a stable code.\n\n**The rule, in `domain/apply-delta.ts`:**\n\n```ts\nexport function applyDelta(current: number, delta: number): number {\n  const next = current + delta;\n  if (next < 0) throw new AppError('INSUFFICIENT_STOCK', { current, delta });\n  return next;\n}\n```\n\n**The use case, in `stock/application/adjust-stock.ts`:**\n\n```ts\nexport async function adjustStock(db: Db, i: { bookId: string; delta: number; reason: Reason; key: string }) {\n  return db.transaction(async (tx) => {\n    // Row lock serializes concurrent adjustments to the same book.\n    const [row] = await tx.select({ quantity: bookStock.quantity }).from(bookStock)\n      .where(eq(bookStock.bookId, i.bookId)).for('update');\n    if (!row) throw new AppError('BOOK_NOT_FOUND');\n\n    const inserted = await tx.insert(stockMovements)\n      .values({ bookId: i.bookId, delta: i.delta, reason: i.reason, idempotencyKey: i.key })\n      .onConflictDoNothing().returning({ id: stockMovements.id });\n    if (inserted.length === 0) return { quantity: row.quantity, replayed: true }; // same key: no second write\n\n    const quantity = applyDelta(row.quantity, i.delta);\n    await tx.update(bookStock).set({ quantity, updatedAt: sql`now()` })\n      .where(eq(bookStock.bookId, i.bookId));\n    return { quantity, replayed: false };\n  });\n}\n```\n\nIf `applyDelta` throws, the transaction rolls back and the movement insert goes with it. A replay returns 200 with the current quantity, and the first call returns 201. Reusing a key with a different body is a known gap. I would either store a hash of the request and answer 422, or note it in the contract. I'd decide that when I read `references/idempotency-contract.md`.\n\n**The route** takes TypeBox schemas for the body `{ delta: int ≠ 0, reason }` and the `Idempotency-Key` header. It calls `adjustStock`, then maps the result to `{ bookId, quantity }`.\n\n**Tests, in TDD order**\n1. Unit: `applyDelta` allows exactly zero and rejects below zero.\n2. Integration: create an author, create a book, then fetch it with stock 0.\n3. Integration: a duplicate ISBN returns 409 `ISBN_TAKEN`.\n4. Integration: an adjustment of +5 then −3 gives 2, and −3 more returns 409 with the quantity still 2.\n5. Integration: the same `Idempotency-Key` sent twice changes the quantity once.\n6. Integration: 20 concurrent −1 adjustments on a quantity of 10 end at exactly 0 with 10 successes and 10 conflicts.\n7. e2e: requests with no or a wrong API key return 401, a malformed body returns 400 in the standard error shape, and an unknown book id returns 404.\n8. A test that `openapi:export` output contains these routes.\n\n**Definition of done for the slice:**\n- `yarn test:ci` passes.\n- The OpenAPI document is generated from the schemas.\n- Logs carry the request id and no API key.\n- The README states how to run it locally.\n\n## After the first slice\n\n- `GET /v1/books` with a cursor and an optional `authorId` or `isbn` filter, then `GET`, `PATCH` and `DELETE` for authors and the rest of the books CRUD.\n- A movement history endpoint, `GET /v1/books/{id}/stock-movements`.\n- CI with `yarn install --immutable` followed by `test:ci`.\n- A Railway deploy and runbook, with a pre-deploy migration and `/readyz` as the health check. I would not start any paid resources without your go-ahead."
+}

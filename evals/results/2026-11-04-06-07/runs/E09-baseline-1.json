@@ -1,0 +1,66 @@
+{
+  "id": "E09",
+  "title": "Out-of-order subscription webhooks",
+  "arm": "baseline",
+  "rep": 1,
+  "status": "graded",
+  "score": 8,
+  "max": 12,
+  "percent": 67,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch"
+  ],
+  "loadedSkills": [],
+  "turns": 2,
+  "seconds": 45,
+  "cost": 0.1064,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 1,
+        "reason": "Mentions verifying the shared authorization header Adapty sends, and stores raw payload with a unique dedupe key. But the key is a fallback chain (event_type:transaction_id or hash), not clearly a provider event id, and auth is only a brief bullet."
+      },
+      "R2": {
+        "score": 0,
+        "reason": "Handler processes the event synchronously inside the request and acks after DB transaction; no queue or async job. Only mentions a queue as a redelivery source."
+      },
+      "R3": {
+        "score": 1,
+        "reason": "Order-independence is achieved via commutative, sticky refunded_at facts and tombstones, so the late renewal does not restore access. It explicitly rejects timestamp/version checks and has no per-user/access-level newer-than guard. The approach works but differs from the reference, and it relies on the refund carrying the same transaction_id."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Dedupe via the inbox primary key with on conflict do nothing, plus idempotent upserts and an advisory lock; duplicates are ignored."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Entitlements are derived server-side from stored transactions. A nightly fetch-and-compare job against Adapty's profile API provides reconciliation. It also says to invalidate any cache after commit and not to derive it from the event. The client isPremium is not trusted implicitly, but is not explicitly called out."
+      },
+      "R6": {
+        "score": 2,
+        "reason": "Test covers all orderings of refund and duplicate renewal, concurrent delivery, and a refund-only user, asserting no premium and a single row."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Applying events in arrival order without a time or version check",
+        "violated": false,
+        "evidence": "Events are applied in arrival order but made commutative via sticky refunded_at and tombstones, so the outcome is order-independent. This is a different guard rather than none."
+      },
+      {
+        "item": "Granting premium from the mobile client",
+        "violated": false,
+        "evidence": "Premium is derived entirely from server-side transaction rows."
+      },
+      {
+        "item": "Assuming every provider signs webhooks the same way (e.g. inventing an HMAC for Adapty)",
+        "violated": false,
+        "evidence": "Uses the shared authorization header Adapty is configured to send, with no HMAC invented."
+      }
+    ],
+    "summary": "A sound commutative-facts design with good dedupe, reconciliation and tests, but it processes synchronously with no async job, uses a weak provider-event-id story, and replaces the time/version guard with sticky refund tombstones.",
+    "cost": 0.0404852
+  },
+  "answer": "The working directory has only a `.gitignore`, so there is no project to read. The file paths below are a proposed layout. I haven't verified Adapty's payload field names against their docs, so check them before you build.\n\n## Core decision\n\nDon't store \"is premium\" as a flag that events flip. Store facts, and derive entitlement from them.\n\n- A renewal creates or updates a transaction fact.\n- A refund sets `refunded_at` on that same transaction. `refunded_at` can be set but never cleared.\n- Premium means at least one transaction for the user is unexpired and not refunded.\n\nEach write is idempotent and commutative, so the final state doesn't depend on arrival order or duplicates. The 10:00/10:05 timestamps are never used to decide the outcome.\n\nHere is how the three deliveries play out:\n\n1. **Refund arrives first.** There is no transaction row yet, so insert a tombstone row with `refunded_at` set and no expiry.\n2. **Renewal arrives.** Upsert the row and fill in `expires_at`. Keep the existing `refunded_at`. The user is not premium.\n3. **Duplicate renewal arrives.** It is dropped by the inbox dedupe, and the upsert would be a no-op anyway.\n\n## Schema (Postgres) — `db/migrations/001_entitlements.sql`\n\n```sql\n-- Raw inbox: dedupe + audit + replay\ncreate table webhook_events (\n  dedupe_key   text primary key,         -- see below\n  event_type   text not null,\n  profile_id   text not null,\n  event_time   timestamptz not null,\n  payload      jsonb not null,\n  received_at  timestamptz not null default now(),\n  processed_at timestamptz\n);\n\n-- One row per store transaction (the unit a refund applies to)\ncreate table subscription_transactions (\n  store                text not null,           -- 'app_store' | 'play_store'\n  transaction_id       text not null,\n  profile_id           text not null,\n  original_transaction_id text,\n  access_level_id      text,                    -- 'premium'\n  purchased_at         timestamptz,             -- null while only a tombstone\n  expires_at           timestamptz,             -- null while only a tombstone\n  refunded_at          timestamptz,             -- sticky\n  updated_at           timestamptz not null default now(),\n  primary key (store, transaction_id)\n);\ncreate index on subscription_transactions (profile_id);\n\n-- Derived. Optional cache; the view is the source of truth.\ncreate view user_entitlements as\nselect profile_id, access_level_id,\n       max(expires_at) as premium_until\nfrom subscription_transactions\nwhere refunded_at is null and expires_at is not null\ngroup by profile_id, access_level_id;\n-- check: premium_until > now()\n```\n\nBecause `now()` is evaluated at read time, expiry needs no cron job.\n\n## Dedupe key\n\nUse a business key, not the delivery. Adapty retries, and your own queue may redeliver. Prefer an event id from Adapty if the payload has one. Otherwise use `event_type + ':' + transaction_id`. As a last resort, use `sha256(raw_body)`.\n\nDedupe is a performance and audit measure. Correctness comes from the idempotent upserts below. Even if the dedupe key were wrong, the result would be the same.\n\n## Handler — `src/webhooks/adapty.ts`\n\n```ts\napp.post('/webhooks/adapty', verifyAdaptyAuth, async (req, res) => {\n  const ev = parseAdaptyEvent(req.body);          // zod schema, maps raw fields\n  await db.tx(async (t) => {\n    // serialize per user so concurrent deliveries can't interleave\n    await t.query('select pg_advisory_xact_lock(hashtext($1))', [ev.profileId]);\n\n    const ins = await t.query(\n      `insert into webhook_events(dedupe_key,event_type,profile_id,event_time,payload)\n       values($1,$2,$3,$4,$5) on conflict do nothing returning 1`,\n      [ev.dedupeKey, ev.type, ev.profileId, ev.time, req.body]);\n    if (ins.rowCount === 0) return;               // duplicate: already handled\n\n    await applyEvent(t, ev);\n    await t.query('update webhook_events set processed_at=now() where dedupe_key=$1',\n                  [ev.dedupeKey]);\n  });\n  res.sendStatus(200);   // 2xx also for duplicates; non-2xx only on real failure so Adapty retries\n});\n```\n\n`applyEvent` lives in `src/webhooks/apply.ts`.\n\n```sql\n-- purchase / renewal / trial / etc.\ninsert into subscription_transactions\n  (store, transaction_id, profile_id, original_transaction_id, access_level_id, purchased_at, expires_at)\nvalues ($1,$2,$3,$4,$5,$6,$7)\non conflict (store, transaction_id) do update set\n  profile_id = excluded.profile_id,\n  original_transaction_id = excluded.original_transaction_id,\n  access_level_id = excluded.access_level_id,\n  purchased_at = excluded.purchased_at,\n  expires_at   = excluded.expires_at,\n  updated_at   = now();               -- refunded_at is deliberately NOT touched\n\n-- refund (works whether or not the row exists)\ninsert into subscription_transactions (store, transaction_id, profile_id, refunded_at)\nvalues ($1,$2,$3,$4)\non conflict (store, transaction_id) do update set\n  refunded_at = coalesce(subscription_transactions.refunded_at, excluded.refunded_at),\n  updated_at  = now();\n```\n\nTwo rules:\n\n- **Don't write the whole entitlement from one event.** Each event touches only its own fields.\n- **Keep refund and renewal in separate branches.** Only the refund branch writes `refunded_at`, and the renewal branch never clears it.\n\nThe `webhook_events` insert and the transaction write are in one DB transaction. A crash can't leave a deduped event that was never applied.\n\n## Other points\n\n- **Which id the refund carries.** The refund must identify the refunded transaction by the same `transaction_id` the renewal uses. If Adapty's refund payload only gives `original_transaction_id`, that is wrong for renewals, because it would revoke the whole chain. In that case, match on the refunded purchase date, or call Adapty's API to resolve it. Check this against real sandbox payloads before relying on it.\n- **Out-of-order access-level events.** If you also consume Adapty's access-level events, don't let them write entitlement. Use them only to trigger a re-fetch of the profile, or ignore them.\n- **Fetch-and-compare backstop.** A nightly job fetches Adapty's profile for users where the two sources disagree, and replays `webhook_events` if needed. This covers a lost webhook, which idempotence alone can't fix.\n- **Authentication.** Verify the shared authorization header that Adapty is configured to send, and reject anything else.\n- **Cache invalidation.** If you cache premium status in Redis or a JWT claim, invalidate it after the transaction commits, using a short TTL. Don't derive it from the event.\n\n## Test — `tests/webhooks/adapty-order.test.ts`\n\nFeed `[refund, renewal, renewal]` in all 3 distinct orderings (6 permutations, with the duplicate renewal counted as one). Then assert two things:\n\n- `user_entitlements` has no premium row for the user.\n- The `subscription_transactions` row count is 1.\n\nAlso test concurrent delivery with `Promise.all`, and a refund-only user. That user should have a tombstone row and no premium.\n\n## Why not the simpler options\n\n- **\"Last event wins by `event_time`.\"** It breaks when timestamps are equal or skewed. It also needs a stored per-user watermark, and a late renewal could still look newer than its refund.\n- **A boolean `is_premium`.** The order-1 sequence (refund, then renewal) ends as premium. The state can't be repaired without replaying the history."
+}

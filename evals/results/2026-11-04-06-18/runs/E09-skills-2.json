@@ -1,0 +1,68 @@
+{
+  "id": "E09",
+  "title": "Out-of-order subscription webhooks",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 11,
+  "max": 12,
+  "percent": 92,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-arch"
+  ],
+  "turns": 6,
+  "seconds": 48,
+  "cost": 0.1527,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 1,
+        "reason": "Authenticates via the Authorization header compared in constant time against the secret configured in Adapty, which is the documented method. Stores events under a PK (provider, event_id) using profile_event_id. But the stored payload is 'minimized', not raw, and the header check appears only as a comment in the code outline."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The route authenticates, inserts the event and returns 2xx, then a queued job processes it. A sweeper re-enqueues lost jobs. Adapty's retry and timeout behavior is noted."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "The guarded upsert applies only when source_event_at is older than the incoming event time. It uses the provider event time rather than arrival time. The refund-first case creates the row, so the late renewal cannot restore access. Equal-timestamp edge cases are discussed."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "The primary key with ON CONFLICT DO NOTHING drops duplicates, returning 200 with no work. The stale guard is a second layer, and a concurrent duplicate test is included."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "A reconcile job against the Adapty server API writes through the same guarded upsert. Entitlements live in the backend keyed by user_id, and premium is computed at read time. The client flag is not trusted. Mapping the Adapty customer user id to user_id is implicit."
+      },
+      "R6": {
+        "score": 2,
+        "reason": "The integration tests cover refund then renewal then renewal again, concurrent duplicates, concurrent reordering, a genuine newer renewal, and reconcile."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Applying events in arrival order without a time or version check",
+        "violated": false,
+        "evidence": "Upsert has WHERE entitlements.source_event_at < EXCLUDED.source_event_at, using Adapty's event time rather than received_at."
+      },
+      {
+        "item": "Granting premium from the mobile client",
+        "violated": false,
+        "evidence": "Premium is derived server-side from the entitlements table at read time, and no client flag is used."
+      },
+      {
+        "item": "Assuming every provider signs webhooks the same way (e.g. inventing an HMAC signature for Adapty without checking)",
+        "violated": false,
+        "evidence": "Uses an Authorization header compared against the secret configured in Adapty, with no HMAC invented."
+      }
+    ],
+    "summary": "The answer is strong on ordering, deduplication, async processing, reconciliation and tests, with a minor gap in raw payload storage and in showing the auth check only as a comment.",
+    "cost": 0.0430232
+  },
+  "answer": "I read the project first. The working directory holds only the node-craft skills (`.claude/skills/...`) and no application code, so there is nothing to modify and the files below are new. The design follows `node-craft-arch/references/webhooks-adapty.md` and `transactions-idempotency.md`. I checked the logic by hand and ran nothing.\n\n## Decisions and reasons\n\n1. **Store every webhook before acting, and dedupe in the database.**\n   - Insert into `webhook_events` with `PRIMARY KEY (provider, event_id)`, where `event_id` is Adapty's `profile_event_id`.\n   - The second delivery of the renewal hits the primary key. That is treated as \"already received\", answered with 200, and no work runs.\n   - An in-memory `Set` or a BullMQ `jobId` would not survive a restart or a second replica, so neither is the guard.\n\n2. **Entitlements store a version, and old events cannot overwrite newer state.**\n   - The row is `entitlements(user_id, access_level, is_active, expires_at, source_event_at, UNIQUE(user_id, access_level))`.\n   - `source_event_at` is Adapty's event time, not our `received_at`. Arrival order is the thing that is wrong here, so it can't be the ordering key.\n   - The write is one atomic upsert that applies only when the incoming event is newer than what is stored.\n\n3. **The refund creates the row when it arrives first.**\n   - It inserts `is_active=false, source_event_at=10:05`.\n   - The late renewal (10:00) then fails `source_event_at < EXCLUDED.source_event_at`, so it changes nothing.\n   - Without upsert semantics, a \"refund with no row\" would be dropped and the renewal would then grant access. That is the bug this design avoids.\n\n4. **Two layers handle the duplicate renewal.**\n   - The event table drops the exact duplicate.\n   - The stale-event guard drops it again if it somehow gets through, because 10:00 is not newer than 10:05.\n\n5. **Acknowledge fast, process in a worker.**\n   - The route authenticates, inserts the event and returns 2xx. Adapty retries for up to a day on errors or replies slower than 10 seconds.\n   - A job then calls the same use case in a short transaction, with no provider calls inside it.\n   - If you don't need a queue yet, processing inline in the request is acceptable while it stays under a second.\n\n6. **\"Premium\" is computed at read time, not trusted from the flag.**\n   - Access is `is_active AND (expires_at IS NULL OR expires_at > now())`.\n   - A missed expiry webhook then cannot leave a user with access.\n\n7. **Reconcile as a safety net.**\n   - Event time alone is a weak ordering key, for example if two events share a timestamp.\n   - After processing an event whose time is at or before the stored `source_event_at`, or one of an unknown type, enqueue a reconcile job.\n   - It calls the Adapty server API, reads `access_levels[]`, and writes the result through the same guarded upsert.\n   - A scheduled run does the same for subscribers near expiry.\n\n## Files\n\n```\nsrc/modules/billing/\n  http/adapty-webhook.route.ts          # auth, raw body, store event, 2xx\n  application/process-adapty-event.ts   # use case: owns the transaction\n  application/reconcile-entitlement.ts  # use case: API fetch, then same upsert\n  domain/event-mapping.ts               # event type -> {isActive, expiresAt}\n  infrastructure/adapty-gateway.ts      # server API adapter, with timeout\n  infrastructure/entitlements.repo.ts   # the guarded upsert\n  worker/process-event.job.ts\nmigrations/NNNN_billing_webhooks_entitlements.sql\ntests/billing/adapty-ordering.integration.test.ts   # real PostgreSQL\n```\n\nEvent mapping (verify names against current Adapty docs before coding):\n\n| Event | Result |\n|---|---|\n| purchase / renewal | active, `expires_at` from the event |\n| cancellation | stays active until expiry |\n| expiry | inactive |\n| refund | inactive |\n| billing issue | per grace-period policy |\n\n## Key SQL\n\n```sql\nCREATE TABLE webhook_events (\n  provider text NOT NULL, event_id text NOT NULL, event_type text NOT NULL,\n  subject_id text, occurred_at timestamptz,\n  received_at timestamptz NOT NULL DEFAULT now(),\n  processed_at timestamptz, status text NOT NULL DEFAULT 'pending',\n  payload jsonb NOT NULL,                       -- minimized, no secrets\n  PRIMARY KEY (provider, event_id)\n);\n\nCREATE TABLE entitlements (\n  user_id uuid NOT NULL REFERENCES users(id),\n  access_level text NOT NULL,\n  is_active boolean NOT NULL,\n  expires_at timestamptz,\n  source_event_at timestamptz NOT NULL,\n  updated_at timestamptz NOT NULL DEFAULT now(),\n  UNIQUE (user_id, access_level)\n);\n```\n\nReceive:\n\n```sql\nINSERT INTO webhook_events (provider, event_id, event_type, subject_id, occurred_at, payload)\nVALUES ('adapty', $1, $2, $3, $4, $5)\nON CONFLICT (provider, event_id) DO NOTHING\nRETURNING event_id;   -- zero rows: duplicate, respond 200 and stop\n```\n\nApply (the use case runs this and marks the event processed in one transaction):\n\n```sql\nINSERT INTO entitlements (user_id, access_level, is_active, expires_at, source_event_at)\nVALUES ($1, $2, $3, $4, $5)\nON CONFLICT (user_id, access_level) DO UPDATE\n  SET is_active = EXCLUDED.is_active,\n      expires_at = EXCLUDED.expires_at,\n      source_event_at = EXCLUDED.source_event_at,\n      updated_at = now()\n  WHERE entitlements.source_event_at < EXCLUDED.source_event_at;\n-- rowCount 0 on conflict = stale or duplicate: log \"ignored_stale\", don't treat it as an error\n```\n\nConcurrent refund and renewal workers are safe. `ON CONFLICT DO UPDATE` locks the row, so the two upserts serialize and each is compared against the committed value.\n\nRead:\n\n```sql\nSELECT EXISTS (\n  SELECT 1 FROM entitlements\n  WHERE user_id = $1 AND access_level = 'premium'\n    AND is_active AND (expires_at IS NULL OR expires_at > now())\n);\n```\n\n## Receiving code (outline)\n\n```ts\n// route: Authorization header compared in constant time (timingSafeEqual) against the\n// per-environment secret configured in Adapty; body size limit set\nconst inserted = await events.insertIfNew(evt);         // ON CONFLICT DO NOTHING\nif (inserted) await queue.add('adapty-event', { eventId: evt.id }); // job is a hint\nreturn reply.code(200).send();                          // duplicates also get 200\n\n// use case, inside one transaction\nconst evt = await events.lockPending(eventId);          // FOR UPDATE SKIP LOCKED; null = done\nif (!evt) return;\nconst next = mapEvent(evt);                             // pure function\nawait entitlements.applyIfNewer(userId, 'premium', next, evt.occurredAt);\nawait events.markProcessed(eventId);\n```\n\nIf the job runs twice, the second run sees the event already processed. Even if it didn't, the upsert would ignore it as stale. A lost job is recovered by a sweeper that re-enqueues events stuck in `pending`.\n\n## Walkthrough of your scenario\n\n| Step | Event | Table state afterwards |\n|---|---|---|\n| 1 | refund (10:05) arrives first | row created: inactive, `source_event_at=10:05` |\n| 2 | renewal (10:00) arrives second | 10:05 < 10:00 is false, no update. State: inactive |\n| 3 | renewal arrives again | primary key conflict, 200, no work. State: inactive |\n\nThe user ends without premium.\n\n## Tests (real PostgreSQL, written first as red)\n\n1. Refund, renewal, then renewal again: no premium, and exactly one `entitlements` row.\n2. Renewal then refund in the normal order: no premium.\n3. Refund and renewal processed concurrently, repeated over many orderings: the result is always inactive.\n4. The same `profile_event_id` posted ten times concurrently: one stored event, one application.\n5. A newer renewal (10:10, a genuine re-subscribe) after the refund: premium is restored. This guards against making refunds permanent.\n6. A transaction that fails midway: the event stays `pending` and the entitlement is unchanged.\n7. Reconcile: the API returns inactive and a stale local row is corrected through the same guarded upsert.\n\n## Caveats\n\n- **Equal timestamps.** With a strict `<`, two events with the same `event_datetime` apply first come, first served. If Adapty can emit refund and renewal with the same time for one transaction, add a rank to the comparison (for example a refund beats a renewal at the same time), or rely on the reconcile job. Check the real payload fields in the current Adapty docs before choosing.\n- **Which event time to use.** Use Adapty's event timestamp for ordering, not the purchase date or `expires_at` inside the payload. A refund of an old transaction would otherwise look older than it is.\n- **Account switch and restore.** The same store account moving between app users needs its own handling. It isn't covered here."
+}

@@ -1,0 +1,65 @@
+{
+  "id": "E11",
+  "title": "Account switch and an old push token",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 10,
+  "max": 10,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch",
+    "node-craft-contract"
+  ],
+  "loadedSkills": [
+    "node-craft-arch"
+  ],
+  "turns": 6,
+  "seconds": 58,
+  "cost": 0.1649,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "push_devices has UNIQUE installation_id and UNIQUE fcm_token, with an upsert on fcm_token that rebinds user_id and bumps binding_epoch; the token-rotation path with a secret is covered."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The PUT body has only pushToken, platform, appVersion and locale. The user comes from the Firebase ID token, and installationId is treated as not a credential."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "It states that offline sign-out never reaches the server, handles it by rebinding on Mehmet's registration, checks the binding at send time in the worker, and adds a secret-based unbind retry. Test 1 covers the case where unbind is never called."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "The push carries only generic text, an opaque notification id and an HMAC recipient tag. Content is fetched after authentication, and the fetch returns 404 for Mehmet."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "It deletes the token on FCM 'not registered' errors. The tests cover account switch, the gap before re-registration, payload content, retry safety and expiry."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Trusting a userId in the registration body",
+        "violated": false,
+        "evidence": "The user is taken from the ID token, and the body has no userId field."
+      },
+      {
+        "item": "Assuming the sign-out request always reaches the server",
+        "violated": false,
+        "evidence": "It says the DELETE is lost when sign-out happens offline, and it designs rebinding, a secret-based unbind retry and send-time checks."
+      },
+      {
+        "item": "Putting appointment details in the push body",
+        "violated": false,
+        "evidence": "The push body is generic localized text with an opaque id, and the test asserts it has no params or medical text."
+      }
+    ],
+    "summary": "A strong answer that meets every rubric item and violates no forbidden decision; it handles offline sign-out through rebinding, send-time checks and a secret-based unbind, and it keeps sensitive content out of the push.",
+    "cost": 0.043071200000000004
+  },
+  "answer": "No application code exists in this working directory, only the `node-craft` skill files. So the paths below are proposed, not edits to existing files. I read `references/notifications.md` and `references/auth.md`. Their rule, \"the next registration by another user re-binds it\", is not enough for your scenario, and I explain why next.\n\n## Why the basic rule fails here\n\nWhen Ayşe signs out offline, `DELETE /me/devices/{id}` never reaches the server. The server still lists her as the owner of the tablet's FCM token. There are three leaks:\n\n1. **The registration gap.** Mehmet signs in, and the app may be offline or its registration call may fail. Until it succeeds, Ayşe's binding is live, and a push for her goes to the tablet.\n2. **OS display.** A push with a `notification` block is shown by the OS before any app code runs, so the app cannot filter it.\n3. **The queued sign-out.** After the server's DELETE is lost, the client cannot retry it. Ayşe's ID token is gone and the endpoint needs a user token.\n\n## Decisions\n\n1. **Nothing private goes in the push.** The push body is generic, localized text such as \"You have a new notification\". It has no appointment, doctor or medical wording, and it carries only an opaque notification id. The app fetches the content through `GET /v1/me/notifications/{id}`, scoped by `WHERE id=$1 AND user_id=$2`. If Mehmet's tablet receives Ayşe's push, he sees a generic line, and the fetch returns 404 for him.\n   - This is the real guarantee. The remaining decisions only reduce how often a wrong push arrives.\n2. **The binding is checked when the worker sends, not when it enqueues.** The job carries `recipientId`, `template` and `params`, as the skill requires. The worker looks up active devices for that user at send time.\n3. **Unbinding does not need the user token.** Registration returns a `deviceSecret`, which the client keeps in secure storage and the server stores only as a hash. On sign-out the client writes an \"unbind pending\" record locally. It sends `POST /v1/devices/{installationId}/unbind` with the secret, which works even with no logged-in user. It retries until it succeeds, and it does so after Mehmet signs in as well.\n4. **Registration rebinds, and a device must keep checking in.** `PUT` is idempotent, runs on every sign-in and app start, and moves the token to the authenticated user. The send query only includes devices with `last_confirmed_at` within 30 days, so abandoned devices drop out.\n5. **The client discards pushes meant for someone else.** The data payload includes `rcpt`, an HMAC of the user id (`HMAC(secret, userId)`). It is opaque, not the real id. The app compares it with the current user and silently drops a mismatch.\n   - On iOS, use a Notification Service Extension with `mutable-content`. The generic text is the fallback, and the extension replaces it with a locally fetched title only after the check passes.\n6. **Invalid tokens and sign-out clean up.** Delete a token when FCM reports `registration-token-not-registered`. On sign-out the client also calls `deleteToken()` and gets a fresh token. This invalidates the old one once the tablet is online.\n7. **The installation id is not a credential.** An attacker who guesses it must not be able to take over a device. The rebind key is the `fcm_token`, which only the device knows. If an `installationId` row is bound to another user and the push token differs, the request must also present the `deviceSecret` or it gets 409.\n\n## API\n\nAll endpoints use the standard envelope and error model from `node-craft-contract`.\n\n| Call | Auth | Behaviour |\n|---|---|---|\n| `PUT /v1/me/devices/{installationId}` body `{ pushToken, platform, appVersion, locale }` | Firebase ID token | The user comes from the token. Upserts and rebinds. Returns `200 { deviceSecret }` only when the secret is created or rotated. |\n| `DELETE /v1/me/devices/{installationId}` | ID token | Normal online sign-out. Idempotent `204`, including when the row is already gone. |\n| `POST /v1/devices/{installationId}/unbind` | Header `X-Device-Secret` | Offline-sign-out recovery. Idempotent `204`. Same response for an unknown id or a wrong secret, so existence does not leak. Rate-limited per IP and per installation. |\n| `GET /v1/me/notifications/{id}` | ID token | Returns content only if the notification belongs to the caller. |\n\n## Data model (migration `NNN_push_devices_binding.sql`)\n\n```sql\nCREATE TABLE push_devices (\n  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  installation_id    text NOT NULL UNIQUE,\n  fcm_token          text NOT NULL UNIQUE,\n  user_id            uuid REFERENCES users(id) ON DELETE CASCADE,   -- NULL = unbound\n  platform           text NOT NULL CHECK (platform IN ('ios','android','web')),\n  device_secret_hash bytea NOT NULL,\n  binding_epoch      integer NOT NULL DEFAULT 1,   -- +1 on every user change\n  last_confirmed_at  timestamptz NOT NULL DEFAULT now(),\n  unbound_at         timestamptz,\n  created_at         timestamptz NOT NULL DEFAULT now(),\n  updated_at         timestamptz NOT NULL DEFAULT now()\n);\nCREATE INDEX push_devices_active_user_idx\n  ON push_devices (user_id, last_confirmed_at DESC) WHERE user_id IS NOT NULL;\n\nCREATE TABLE notifications (          -- the content lives here, never in the push\n  id           uuid PRIMARY KEY,\n  user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,\n  template     text NOT NULL,\n  template_version integer NOT NULL,\n  params       jsonb NOT NULL,\n  created_at   timestamptz NOT NULL DEFAULT now(),\n  read_at      timestamptz\n);\n\nCREATE TABLE notification_deliveries (  -- audit: which binding got it\n  notification_id uuid NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,\n  device_id       uuid NOT NULL REFERENCES push_devices(id) ON DELETE CASCADE,\n  binding_epoch   integer NOT NULL,\n  provider_message_id text,\n  sent_at         timestamptz NOT NULL DEFAULT now(),\n  PRIMARY KEY (notification_id, device_id)   -- retry cannot double-send\n);\n```\n\n**Register or rebind, in one statement.** It is race-safe because the unique constraints decide the outcome. The conflict target is the token. If the token is new and the `installation_id` is taken, the statement fails with 23505. That case is the token-rotation path: the repository first checks the `deviceSecret` and then updates the row by `installation_id`.\n\n```sql\nINSERT INTO push_devices (installation_id, fcm_token, user_id, platform, device_secret_hash)\nVALUES ($1, $2, $3, $4, $5)\nON CONFLICT (fcm_token) DO UPDATE SET\n  installation_id   = EXCLUDED.installation_id,\n  binding_epoch     = push_devices.binding_epoch\n                      + (push_devices.user_id IS DISTINCT FROM EXCLUDED.user_id)::int,\n  user_id           = EXCLUDED.user_id,\n  unbound_at        = NULL,\n  last_confirmed_at = now(),\n  updated_at        = now()\nRETURNING id, binding_epoch;\n```\n\n**Unbind:**\n\n```sql\nUPDATE push_devices\n   SET user_id = NULL, unbound_at = now(), binding_epoch = binding_epoch + 1\n WHERE installation_id = $1\n   AND device_secret_hash = $2     -- sha256 of the presented secret\n   AND user_id IS NOT NULL;\n```\n\n**Send-time lookup**, run by the worker, never cached across jobs:\n\n```sql\nSELECT id, fcm_token, binding_epoch\nFROM push_devices\nWHERE user_id = $1\n  AND last_confirmed_at > now() - interval '30 days';\n```\n\n## Files to add or change\n\n`src/modules/devices/` follows the feature-module layout.\n- `devices.routes.ts`: the `PUT`, `DELETE` and `unbind` routes, with schemas for validation and OpenAPI.\n- `register-device.usecase.ts`: owns the transaction.\n- `unbind-device.usecase.ts`: unbind by device secret.\n- `devices.repository.ts`: the SQL above.\n\n`src/modules/notifications/`\n- `notifications.routes.ts`: `GET /me/notifications/:id`.\n- `send-push.worker.ts`: does the lookup, builds the generic payload and sends. It deletes the token on an FCM \"not registered\" error.\n- `push-payload.ts`: builds `{ v:1, nid, rcpt, route }` and the generic localized text from the `i18n` catalog.\n\n`migrations/NNN_push_devices_binding.sql`: the tables above. The new table is empty, but if `push_devices` already exists, use expand/contract. Add `device_secret_hash` as nullable, backfill, then make it NOT NULL. Old clients without a secret keep working and get one on their next `PUT`.\n\n`openapi` updates for the three device endpoints, plus the shared error codes `DEVICE_CONFLICT` (409) and `RATE_LIMITED`.\n\n## Tests, on real PostgreSQL and in the order I would write them\n\n1. **The case in question.** Register the tablet for Ayşe. Never call unbind. Register the same token for Mehmet. Send to Ayşe. Expect zero FCM calls and no `notification_deliveries` row.\n2. **Gap before re-registration.** Ayşe is still bound and the tablet has done an offline unbind with a valid secret. After the unbind arrives, a send to Ayşe sends nothing.\n3. **Secret handling.** A wrong secret gives the same response as an unknown id, and nothing changes. Two concurrent `PUT`s with the same token leave one row and a consistent epoch.\n4. **Payload content.** The push body contains no `params` and no medical text. `GET /me/notifications/{id}` returns 404 for Mehmet.\n5. **Retry safety.** A worker job redelivered after it sent does not send twice, because of the delivery PK.\n6. **Expiry.** A device not confirmed for more than 30 days is skipped.\n\n## What this does not close\n\nA push that FCM accepted for the old binding a moment before the rebind can still arrive. That is why decisions 1 and 5 matter. Clear this window with the user's own policy if it is a compliance concern. The generic text and the opaque id mean the only thing that can leak is \"Ayşe has a notification\".\n\nOffline sign-out also leaves an unbound-looking gap while the tablet has no connectivity. A push cannot reach an offline tablet anyway, and when it comes online the unbind retry and Mehmet's `PUT` both run before it can fetch anything."
+}

@@ -1,0 +1,71 @@
+{
+  "id": "E13",
+  "title": "Failed migration and worker shutdown during deploy",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 9,
+  "max": 10,
+  "percent": 90,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-ops",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-ops",
+    "node-craft-arch"
+  ],
+  "turns": 11,
+  "seconds": 58,
+  "cost": 0.1854,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Pre-deploy command on API service only, worker has none, non-zero exit stops deploy, advisory lock plus lock_timeout, and start commands explicitly don't run migrations."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Gives expand/backfill/contract with a nullable column, CHECK NOT VALID, a batched resumable backfill outside pre-deploy, VALIDATE CONSTRAINT, SET NOT NULL, and lock_timeout. It also covers the constant-default shortcut."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Separate /health/live and /health/ready, readiness does a DB check and returns 503 on shutdown, and an always-200 check is explicitly rejected."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "worker.close() on SIGTERM with a timeout under the draining seconds, RAILWAY_DEPLOYMENT_DRAINING_SECONDS set, and an idempotent Postgres-backed email handler with the residual risk stated."
+      },
+      "R5": {
+        "score": 1,
+        "reason": "Checks the state left by the failure, says to confirm a backup, says code rollback is not a schema rollback, and recommends a forward fix with a runbook. It has no explicit restore plan and no explicit instruction to report the incident openly."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Running migrations in every service's start command",
+        "violated": false,
+        "evidence": "Explicitly rejected; migrations run in a pre-deploy step on the API service only."
+      },
+      {
+        "item": "Faking a successful health check",
+        "violated": false,
+        "evidence": "Rejects the always-200 health check and proposes honest readiness."
+      },
+      {
+        "item": "Treating application rollback as a database rollback",
+        "violated": false,
+        "evidence": "States that rolling back the code does not roll back the schema."
+      },
+      {
+        "item": "Hiding the failure",
+        "violated": false,
+        "evidence": "Says the failed deploy did its job in stopping a bad release. It does not hide the failure, though it also says little about reporting it."
+      }
+    ],
+    "summary": "Strong, correct answer covering single pre-deploy migration, safe expand/backfill/validate, honest health checks and graceful worker shutdown with idempotency, and slightly thin on a restore plan and explicit incident reporting.",
+    "cost": 0.041671200000000005
+  },
+  "answer": "The working directory has no application code. It contains only the node-craft skill files, so I couldn't inspect your repo. I based this on the node-craft ops and arch rules and on Railway's documented behaviour. I did not check the Railway docs today, so confirm the Railway specifics before you rely on them. Table and column names below are placeholders.\n\n## Reject both suggestions\n\n**Migrations in the start command of both services**\n- Every replica of both services would run the migration on every restart, while the old version is still serving traffic.\n- The two services would race each other, and a 20M-row change would hold locks while every restart retries it.\n- A failed migration would no longer stop the release. It would crash-loop live instances.\n\n**A health check that always returns 200**\n- Railway uses the health check to decide whether the new version gets traffic. If it always passes, a broken version gets traffic.\n- The failed deploy did its job: it stopped a bad release. The real problems are that the migration was unsafe and the worker shutdown was not graceful.\n\n## Decisions\n\n1. **One owner for migrations: a pre-deploy step on the API service.**\n   - Set the pre-deploy command to `yarn db:migrate` on the API service only. The worker service has none.\n   - A non-zero exit stops the deploy, so no traffic reaches a version whose migration failed.\n   - Add a PostgreSQL advisory lock as a second guard, and set `lock_timeout` so a blocked `ALTER` fails fast instead of queueing every query behind it.\n   - Build only compiles. Start only runs `node dist/server.js` and `node dist/worker.js`.\n2. **Pre-deploy only runs fast, additive migrations.** The `NOT NULL` change is split into expand, backfill and contract steps. The backfill is a separate resumable operation, not a deploy step.\n3. **The health check tells the truth, with two endpoints.**\n   - `/health/live` checks nothing external.\n   - `/health/ready` runs `SELECT 1` with a 1 s timeout and returns 503 once shutdown starts.\n   - Set the Railway health check path to `/health/ready` for the API. The worker has no public domain, so it needs no HTTP check.\n4. **Worker shutdown is bounded and jobs are idempotent.** The email jobs were cut off because the worker did not finish its active jobs before it was killed. Jobs can be redelivered, so handlers must be safe to run twice.\n\n## 1. The NOT NULL column on 20M rows\n\nFirst check what state the failed migration left behind. Run `\\d table` and look at your migration history table. PostgreSQL DDL is transactional, so a failed `ALTER` should have rolled back. If the migration tool ran without a transaction, or you ran `CREATE INDEX CONCURRENTLY`, you may have a partial change or an `INVALID` index to clean up.\n\n**Option A, the cheapest.** If a constant default is acceptable, do one statement:\n\n```sql\nSET lock_timeout = '3s';\nALTER TABLE orders ADD COLUMN region text NOT NULL DEFAULT 'unknown';\n```\n\nOn PostgreSQL 11 and later, a constant default is metadata-only, with no rewrite. A volatile default such as `now()` or `gen_random_uuid()` rewrites all 20M rows under an exclusive lock. That is a likely cause of your failure.\n\n**Option B.** Use this if the value must be computed per row. Each step is its own release:\n\n```sql\n-- Release 1 (pre-deploy, instant): expand\nSET lock_timeout = '3s';\nALTER TABLE orders ADD COLUMN region text;   -- nullable, no default\n```\n\nThen deploy code that always writes `region`. Old code never writes it, so the constraint in the next step must come after this deploy.\n\n```sql\n-- Release 2 (pre-deploy, instant): enforce on new and updated rows only\nSET lock_timeout = '3s';\nALTER TABLE orders ADD CONSTRAINT orders_region_nn CHECK (region IS NOT NULL) NOT VALID;\n```\n\n```sql\n-- Backfill: separate command, run as a Railway one-off, never in pre-deploy.\n-- Repeat per id range until 0 rows are updated. Log progress, sleep between batches.\nUPDATE orders SET region = <computed>\nWHERE id > $1 AND id <= $2 AND region IS NULL;\n```\n\n```sql\n-- Release 3 (contract)\nALTER TABLE orders VALIDATE CONSTRAINT orders_region_nn;  -- scans, but does not block writes\nALTER TABLE orders ALTER COLUMN region SET NOT NULL;      -- skips the scan on PG12+ via the validated CHECK\nALTER TABLE orders DROP CONSTRAINT orders_region_nn;\n```\n\nBefore the backfill and contract steps, confirm a recent backup. Rolling back the code does not roll back the schema, so each release must work with the previous code version.\n\n## 2. Worker shutdown and email jobs\n\n```ts\n// src/worker.ts\nconst worker = new Worker('email', processEmail, {\n  connection,\n  concurrency: 5,          // keep concurrency × replicas within the DB pool size\n  lockDuration: 60_000,    // longer than the longest job step\n  maxStalledCount: 3,      // a job killed mid-run is retried, not failed\n});\n\nlet ready = true;\nconst shutdown = async (signal: string) => {\n  log.info({ signal }, 'shutting down');\n  ready = false;\n  const timer = setTimeout(() => process.exit(1), 50_000).unref(); // below the draining time\n  try {\n    await worker.close();  // stop taking jobs, let active ones finish\n    await pool.end();\n    await redis.quit();\n  } finally {\n    clearTimeout(timer);\n  }\n  process.exit(0);\n};\nprocess.once('SIGTERM', () => void shutdown('SIGTERM'));\nprocess.once('SIGINT', () => void shutdown('SIGINT'));\n```\n\n- Set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=60` on the worker service. It must be longer than your longest job step. The app's own timeout above (50 s) must be shorter than it.\n- Give the provider call a timeout (`AbortSignal.timeout(15_000)`) so no step can outlast the draining time.\n- The API shuts down the same way. Keep Fastify's `return503OnClosing` on and call `app.close()`.\n- Set `removeOnComplete` and `removeOnFail` with an age or count so Redis doesn't grow forever.\n- Check that the Redis `maxmemory-policy` is `noeviction`. An eviction policy would drop queued jobs silently.\n\n**Make the email handler idempotent in PostgreSQL**, not by `jobId` alone:\n\n```sql\nCREATE TABLE email_deliveries (\n  job_type    text NOT NULL,\n  business_key text NOT NULL,\n  status      text NOT NULL DEFAULT 'sending',\n  sent_at     timestamptz,\n  UNIQUE (job_type, business_key)\n);\n```\n\nThe handler runs these steps:\n1. Insert into `email_deliveries ... ON CONFLICT DO NOTHING`. If the row is already `sent`, return.\n2. Call the provider, passing `business_key` as its idempotency key if the provider supports one.\n3. Mark the row `sent`.\n\nIf your email provider has no idempotency key, a crash between the send and step 3 can still send a duplicate. Record that as a known residual risk.\n\nTest shutdown directly: start a slow job, send `SIGTERM`, and assert the job either finishes or is retried once with no second email.\n\n## Files to add or change\n\n| File | Change |\n|---|---|\n| `.railway/railway.ts` | Declares the API pre-deploy command (`yarn db:migrate`), health check path `/health/ready`, a bounded restart policy and draining seconds. It also declares the worker's start command and draining seconds, with no pre-deploy. Railway's `railway.json` format stops working on 2026-12-01 and `.railway/railway.ts` replaces it, but verify that against the current docs. |\n| `package.json` | Scripts: `db:migrate`, `db:backfill:region`, `start:api`, `start:worker`. |\n| `migrations/*_add_region_expand.sql` and the later contract steps | The SQL above. Each starts with `SET lock_timeout`. |\n| `scripts/backfill-region.ts` | A batched, resumable backfill that logs progress. |\n| `src/health.ts` | `/health/live` and `/health/ready`, with readiness failing on shutdown. |\n| `src/worker.ts`, `src/server.ts` | The shutdown code above. |\n| `src/jobs/email.ts` and a migration for `email_deliveries` | The idempotent handler. |\n| `.github/workflows/ci.yml` | Apply migrations to an empty database and to one at the previous release's schema. |\n| `docs/runbooks/release.md` | Which rollback applies to each release, and how to resume a backfill. |\n\n## Release order next time\n\n1. Merge only after CI is green, including migrations applied to both database states.\n2. Deploy to staging and run the pre-deploy migration, health check and smoke tests.\n3. Release to production with approval and watch error rates and queue lag.\n\nI haven't changed anything or deployed anything."
+}

@@ -1,0 +1,80 @@
+{
+  "id": "E03",
+  "title": "Existing backend keeps its decisions",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 12,
+  "max": 14,
+  "percent": 86,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft",
+    "node-craft-contract",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft",
+    "node-craft-contract"
+  ],
+  "turns": 23,
+  "seconds": 72,
+  "cost": 0.233,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Keeps NestJS/Express, Prisma, npm, Jest and class-validator, and states it keeps all of them. It adds no Fastify, Drizzle, Yarn or second lockfile."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Copies the customers controller/service pattern, uses the existing FirebaseAuthGuard and @CurrentUser(), and fills in the existing InvoicesModule."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "The query filters on ownerId and companyId taken from the authenticated user. The e2e tests include another user's invoices, another company's, and a cursor built from another user's invoice."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Cursor pagination with limit capped at 100, order issuedAt desc then id desc, a unique id tie-breaker, and a strictly validated cursor."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Keeps the HttpErrorFilter shape and throws ordinary Nest exceptions. It drops the skill's INVALID_CURSOR code to avoid changing the shape."
+      },
+      "R6": {
+        "score": 1,
+        "reason": "States the tests are written first (Red to Green) and lists them in detail. It does not say which commands would be run, such as npm test or the e2e script, and it adds a Prisma migration and index without saying how that would be run."
+      },
+      "R7": {
+        "score": 1,
+        "reason": "It names no modernization as part of the change. It does not offer a separate proposal section either, though it notes cursor versus offset and the index as flagged items. The index and migration are part of the change and are not optional."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Switching to Fastify or the Fastify adapter, Drizzle, Yarn or Vitest as part of the change",
+        "violated": false,
+        "evidence": "It states 'NestJS on the Express adapter, Prisma, class-validator, npm and Jest. I keep all of it.'"
+      },
+      {
+        "item": "Adding a second lockfile or a second ORM",
+        "violated": false,
+        "evidence": "It adds no lockfile and uses only Prisma. The only new migration is a Prisma migration."
+      },
+      {
+        "item": "Changing the existing error response format clients rely on",
+        "violated": false,
+        "evidence": "'I throw ordinary Nest exceptions and leave the wire format alone.' It also declines to add an error code."
+      },
+      {
+        "item": "Taking the user id from the query string or body",
+        "violated": false,
+        "evidence": "ownerId and companyId come from the authenticated user via @CurrentUser(). The query DTO has only limit and cursor."
+      }
+    ],
+    "summary": "A strong, convention-following plan with owner filtering, bounded stable cursor pagination and tests first. It loses some credit for not naming the test commands it would run and for having no explicit modernization proposal.",
+    "cost": 0.0455552
+  },
+  "answer": "# Plan: `GET /api/v1/invoices` (own invoices, newest first, paginated)\n\nI read the project and ran nothing. This is a plan with the key code, and no files have been created or changed.\n\n## What the project already decides\n- **Stack:** NestJS on the Express adapter, Prisma, class-validator, npm and Jest. I keep all of it.\n- **Auth:** `FirebaseAuthGuard` puts `{ id, companyId }` on the request, and `@CurrentUser()` reads it. The new endpoint uses both unchanged.\n- **Customers list:** `customers.controller.ts` and `customers.service.ts` are the pattern to copy. They filter by `ownerId` and `companyId` and return `{ items, limit, offset }`.\n- **Errors:** `HttpErrorFilter` returns `{ statusCode, error, message }`, and clients parse that shape. I throw ordinary Nest exceptions and leave the wire format alone.\n- **Module:** `InvoicesModule` exists, is already imported in `AppModule`, and has no HTTP surface yet. So `app.module.ts` doesn't change.\n\n## Decisions and reasons\n1. **Cursor pagination, not offset.** Invoices grow without bound. The customers list uses `offset`, which scans and discards rows at depth. I use the cursor from the `node-craft-contract` skill, but keep the project's flat `items` / `limit` response keys instead of switching to a `data` / `meta` envelope. Clients that already read the customers list will recognise the shape. The only additions are `hasMore` and `nextCursor`. I'm choosing consistency with the existing API over the skill's default envelope.\n2. **Sort by `issuedAt DESC, id DESC`.** `Invoice` has no `createdAt`, and `issuedAt` is the business date. `id` is the unique tie-breaker, so pages never skip or repeat rows.\n3. **\"Own\" means `ownerId = user.id` and `companyId = user.companyId`.** Both come from the verified token's user row, never from the query. Another user's invoices are never reachable, and a request with `ownerId` or `companyId` in the query is rejected by the global `forbidNonWhitelisted`.\n4. **The cursor is not signed.** The cursor is base64url JSON of `{ t, i }`. A forged cursor can only change where you start inside your own rows, because the owner and company filters always apply. I validate the shape strictly (ISO date round-trip and UUID) and return 400 on anything else. Signing adds a secret and no security.\n5. **Limit and count:** default 20, max 100, matching the customers DTO. There is no `total`, because an exact count per request is expensive and `hasMore` is enough.\n6. **Explicit `select`.** The response has `id, number, customerId, totalMinor, currency, issuedAt`. Money stays as integer minor units plus currency, and `ownerId` and `companyId` are not exposed.\n7. **New index.** `invoices` only has `(company_id, number)` unique. Without an index on `(owner_id, issued_at DESC, id DESC)`, this endpoint sorts a user's invoices on every page request.\n\n## Files\n\n**Change**\n- `prisma/schema.prisma`: add to `Invoice`:\n  ```prisma\n  @@index([ownerId, issuedAt(sort: Desc), id(sort: Desc)])\n  ```\n- `src/invoices/invoices.module.ts`: add `controllers: [InvoicesController]`, and `InvoicesService` to `providers`. Remove the stale \"no HTTP surface yet\" comment.\n\n**Add**\n- `prisma/migrations/<timestamp>_invoices_owner_issued_idx/migration.sql`:\n  ```sql\n  CREATE INDEX \"invoices_owner_id_issued_at_id_idx\"\n    ON \"invoices\" (\"owner_id\", \"issued_at\" DESC, \"id\" DESC);\n  ```\n- `src/invoices/dto/list-invoices.query.ts`\n- `src/invoices/invoice-cursor.ts`\n- `src/invoices/invoices.service.ts`\n- `src/invoices/invoices.controller.ts`\n- `test/invoices.e2e-spec.ts`\n- `src/invoices/invoice-cursor.spec.ts`\n\n## Key code\n\n```ts\n// src/invoices/dto/list-invoices.query.ts\nimport { Type } from 'class-transformer';\nimport { IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';\n\nexport class ListInvoicesQuery {\n  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100)\n  limit = 20;\n\n  @IsOptional() @IsString() @MaxLength(200)\n  cursor?: string;\n}\n```\n\n```ts\n// src/invoices/invoice-cursor.ts\nimport { BadRequestException } from '@nestjs/common';\n\nexport interface InvoiceCursor { issuedAt: Date; id: string }\n\nconst UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\n\nexport function encodeCursor(c: InvoiceCursor): string {\n  return Buffer.from(JSON.stringify({ t: c.issuedAt.toISOString(), i: c.id })).toString('base64url');\n}\n\nexport function decodeCursor(raw: string): InvoiceCursor {\n  try {\n    const { t, i } = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));\n    const issuedAt = new Date(t);\n    if (typeof t !== 'string' || typeof i !== 'string' || !UUID.test(i) ||\n        Number.isNaN(issuedAt.getTime()) || issuedAt.toISOString() !== t) throw new Error();\n    return { issuedAt, id: i };\n  } catch {\n    throw new BadRequestException('Invalid cursor');\n  }\n}\n```\n\n```ts\n// src/invoices/invoices.service.ts\n@Injectable()\nexport class InvoicesService {\n  constructor(private readonly prisma: PrismaService) {}\n\n  async list(user: CurrentUser, query: ListInvoicesQuery) {\n    const after = query.cursor ? decodeCursor(query.cursor) : undefined;\n    const rows = await this.prisma.invoice.findMany({\n      where: {\n        ownerId: user.id,\n        companyId: user.companyId,\n        ...(after && {\n          OR: [\n            { issuedAt: { lt: after.issuedAt } },\n            { issuedAt: after.issuedAt, id: { lt: after.id } },\n          ],\n        }),\n      },\n      orderBy: [{ issuedAt: 'desc' }, { id: 'desc' }],\n      take: query.limit + 1, // one extra row tells us whether another page exists\n      select: { id: true, number: true, customerId: true, totalMinor: true, currency: true, issuedAt: true },\n    });\n    const hasMore = rows.length > query.limit;\n    const items = hasMore ? rows.slice(0, query.limit) : rows;\n    const last = items.at(-1);\n    return { items, limit: query.limit, hasMore, nextCursor: hasMore && last ? encodeCursor(last) : null };\n  }\n}\n```\n\n```ts\n// src/invoices/invoices.controller.ts\n@Controller('invoices')\n@UseGuards(FirebaseAuthGuard)\nexport class InvoicesController {\n  constructor(private readonly invoices: InvoicesService) {}\n\n  @Get()\n  list(@CurrentUser() user: User, @Query() query: ListInvoicesQuery) {\n    return this.invoices.list(user, query);\n  }\n}\n```\n\nExample response:\n```json\n{ \"items\": [{ \"id\": \"…\", \"number\": \"INV-1042\", \"customerId\": \"…\", \"totalMinor\": 12500, \"currency\": \"EUR\", \"issuedAt\": \"2026-11-04T08:30:00.000Z\" }],\n  \"limit\": 20, \"hasMore\": true, \"nextCursor\": \"eyJ0Ijoi…\" }\n```\n\n## Tests (written first, Red → Green)\nIn `test/invoices.e2e-spec.ts`, against real PostgreSQL, since sorting and cursors are query behaviour:\n- No token or a bad token returns 401.\n- Alice sees only her own invoices, never Bob's and never another company's.\n- The order is newest first, and invoices with the same `issuedAt` are ordered by `id` descending.\n- Paging with `limit=2` over 5 invoices gives 2, 2 and 1 rows. There are no duplicates or gaps, and the last page has `hasMore: false` and `nextCursor: null`.\n- A user with no invoices gets `200` with `items: []`.\n- `limit=0`, `limit=101` and `offset=1` return 400.\n- Garbage, tampered or wrong-shape cursors return 400.\n- A valid cursor built from another user's invoice still returns only the caller's rows.\n\n`invoice-cursor.spec.ts` unit-tests the encode/decode round trip and the rejections.\n\n## Things to check or flag\n- **Test setup:** `test/customers.e2e-spec.ts` imports `./support/seed` (`seedTwoCompanies`, `tokenFor`), but that file isn't in the repo tree I can see. I'd need to see it, and probably add invoice fixtures to it additively.\n- **Global pipe and filter in tests:** the existing e2e bootstrap sets only the global prefix. My 400 tests need `app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }))` and the `HttpErrorFilter` in the test app, mirroring `main.ts`. I'd rather not change the customers test.\n- **No migrations folder:** the repo has no `prisma/migrations/`, although `package.json` runs `prisma migrate deploy`. Confirm where migrations live before I add the index migration.\n- **Index creation on a live table:** a plain `CREATE INDEX` blocks writes to `invoices` while it builds, and the billing job writes there. `CREATE INDEX CONCURRENTLY` avoids that, but it can't run inside Prisma's migration transaction, so it would be applied as a separate step. I need the table size to choose.\n- **Query plan:** the Prisma `OR` form of the cursor condition may not give a clean index range scan. I'd check it with `EXPLAIN` on realistic data. If it doesn't, I'd switch that one query to a parameterised `$queryRaw` with the row comparison `(issued_at, id) < ($1, $2)`.\n- **Error codes:** the skill's `INVALID_CURSOR` code doesn't fit the project's `{ statusCode, error, message }` shape. I'm not changing that shape, so the 400 carries only a message.\n- **OpenAPI:** the project has no OpenAPI source, so there is no spec to update. I'd document the endpoint in the README or leave a note if you want a spec added.\n\nNothing has been run, so no tests, build, migration or query plan has been verified."
+}

@@ -1,0 +1,68 @@
+{
+  "id": "E09",
+  "title": "Out-of-order subscription webhooks",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 12,
+  "max": 12,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-arch"
+  ],
+  "turns": 6,
+  "seconds": 46,
+  "cost": 0.1546,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Compares the Authorization header against the configured secret in constant time (401 on mismatch), which matches Adapty's documented method. It stores the raw payload with PRIMARY KEY (provider, event_id) using profile_event_id and ON CONFLICT DO NOTHING."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The route only authenticates, inserts and enqueues, then returns 200 well inside Adapty's 10-second limit. A worker job processes the event, and a sweep recovers lost enqueues."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "A guarded atomic upsert applies an event only if (source_event_at, event_id) is newer. The refund inserts an inactive tombstone, so the late renewal is marked ignored_stale. Ties are broken deterministically. It also flags the case of a refund for an old transaction."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "A unique constraint on (provider, event_id) with ON CONFLICT DO NOTHING handles redelivery. FOR UPDATE with a status check makes job reruns no-ops, and the stale guard is a second layer."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Entitlements are stored server-side keyed by users.id, which is used as the Adapty customer user id. A scheduled reconciliation job fetches profile access_levels from the Adapty server API, and the answer says never to trust a client isPremium."
+      },
+      "R6": {
+        "score": 2,
+        "reason": "Nine integration tests cover refund then renewal, a duplicate renewal, concurrent workers, same-timestamp tiebreak, job rerun, auth failure and the crash-and-sweep case. The answer also asks for tests to be written first and shown failing."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Applying events in arrival order without a time or version check",
+        "violated": false,
+        "evidence": "The upsert's WHERE clause compares (source_event_at, event_id) so a stale event cannot overwrite newer state."
+      },
+      {
+        "item": "Granting premium from the mobile client",
+        "violated": false,
+        "evidence": "It states 'Never grant premium from a client isPremium'. The server-side entitlements table is the source of truth."
+      },
+      {
+        "item": "Assuming every provider signs webhooks the same way (e.g. inventing an HMAC signature for Adapty)",
+        "violated": false,
+        "evidence": "It uses the Authorization header compared to a configured secret, with no HMAC. It also says to verify event names and fields against the Adapty docs."
+      }
+    ],
+    "summary": "The answer fully meets every rubric item and violates no forbidden decision: it uses header auth, a unique event id, a fast ack with async jobs, an atomic stale-event guard with a tombstone upsert, reconciliation, and thorough tests.",
+    "cost": 0.0442872
+  },
+  "answer": "The working directory has no application code, only the node-craft skill files, so this design follows `references/webhooks-adapty.md` and `references/transactions-idempotency.md`. I read no existing schema or handlers.\n\n## Core decision\n\nStore the facts and compare event time per user. An event may only change the entitlement if it is newer than the event that produced the current row. The refund at 10:05 therefore wins over the renewal at 10:00, whatever order they arrive in.\n\nWalking through your scenario:\n\n| Arrival | Event | Result |\n|---|---|---|\n| 1 | refund (10:05) | There is no entitlement row yet, so it is created as `is_active=false, source_event_at=10:05`. |\n| 2 | renewal (10:00) | Stale, because 10:00 < 10:05. The update matches 0 rows and the event is marked `ignored_stale`. |\n| 3 | renewal (10:00), duplicate | The duplicate is caught at insert and answered with 200. If it slipped past, the stale check would still reject it. |\n\nThe user ends without premium.\n\n## Two layers of protection\n\n1. **Duplicates** are handled by `UNIQUE (provider, event_id)`, using Adapty's `profile_event_id`. This stops redelivery.\n2. **Ordering** is handled by a stale-event guard on the entitlement row. This stops late events from reverting newer state.\n\nDedupe alone would not fix your case, because the late renewal is a different, first-seen event. The ordering guard alone would not save work on redeliveries. You need both.\n\n## Files to add or change\n\n```\nsrc/modules/billing/\n  http/adapty-webhook.route.ts          # auth, persist, ack\n  application/process-adapty-event.ts   # use case: owns the transaction\n  domain/entitlement-rules.ts           # event type -> desired state (pure)\n  infrastructure/entitlements.repo.ts   # guarded upsert\n  infrastructure/adapty-api.client.ts   # reconciliation (profile fetch)\n  jobs/process-adapty-event.job.ts      # worker calls the same use case\n  jobs/reconcile-entitlements.job.ts    # scheduled\nmigrations/NNNN_billing_webhooks_entitlements.sql\ntests/billing/*.int.test.ts             # real PostgreSQL\n```\n\n## Migration\n\n```sql\nCREATE TABLE webhook_events (\n  provider     text        NOT NULL,\n  event_id     text        NOT NULL,              -- Adapty profile_event_id\n  event_type   text        NOT NULL,\n  subject_id   uuid,                              -- customer_user_id = users.id\n  occurred_at  timestamptz NOT NULL,              -- event_datetime from Adapty\n  received_at  timestamptz NOT NULL DEFAULT now(),\n  processed_at timestamptz,\n  status       text        NOT NULL DEFAULT 'pending',  -- pending|applied|ignored_stale|failed\n  payload      jsonb       NOT NULL,              -- minimized\n  PRIMARY KEY (provider, event_id)\n);\nCREATE INDEX webhook_events_pending ON webhook_events (received_at) WHERE status = 'pending';\n\nCREATE TABLE entitlements (\n  user_id         uuid        NOT NULL REFERENCES users(id),\n  access_level    text        NOT NULL,\n  is_active       boolean     NOT NULL,\n  expires_at      timestamptz,\n  source_event_at timestamptz NOT NULL,\n  source_event_id text        NOT NULL,\n  updated_at      timestamptz NOT NULL DEFAULT now(),\n  UNIQUE (user_id, access_level)\n);\n```\n\n## Webhook route\n\nThe route does three things and nothing more:\n\n1. Compare the `Authorization` header with the configured secret in constant time. Return 401 on a mismatch.\n2. Validate the payload with a schema, then insert the event:\n\n```sql\nINSERT INTO webhook_events (provider, event_id, event_type, subject_id, occurred_at, payload)\nVALUES ('adapty', $1, $2, $3, $4, $5)\nON CONFLICT (provider, event_id) DO NOTHING\nRETURNING event_id;\n```\n\n3. Return 200 either way. If a row was inserted, enqueue the processing job. If none was, it was a duplicate, so stop.\n\nThe route does no other work, so it answers well inside Adapty's 10-second limit. A lost enqueue is covered by the sweep described below.\n\n## Use case\n\n`processAdaptyEvent(eventId)` runs in one short transaction. There are no provider calls inside it.\n\n```ts\nawait db.tx(async (tx) => {\n  const ev = await tx.one(\n    `SELECT * FROM webhook_events WHERE provider='adapty' AND event_id=$1 FOR UPDATE`, [eventId]);\n  if (ev.status !== 'pending') return;              // job redelivery is a no-op\n\n  const desired = deriveState(ev);                  // pure: see rules below\n  const applied = await tx.result(`\n    INSERT INTO entitlements (user_id, access_level, is_active, expires_at, source_event_at, source_event_id)\n    VALUES ($1,$2,$3,$4,$5,$6)\n    ON CONFLICT (user_id, access_level) DO UPDATE\n      SET is_active = EXCLUDED.is_active,\n          expires_at = EXCLUDED.expires_at,\n          source_event_at = EXCLUDED.source_event_at,\n          source_event_id = EXCLUDED.source_event_id,\n          updated_at = now()\n      WHERE (entitlements.source_event_at, entitlements.source_event_id)\n          < (EXCLUDED.source_event_at, EXCLUDED.source_event_id)`,\n    [ev.subject_id, desired.level, desired.active, desired.expiresAt, ev.occurred_at, ev.event_id]);\n\n  await tx.none(`UPDATE webhook_events SET status=$2, processed_at=now()\n                 WHERE provider='adapty' AND event_id=$1`,\n                [eventId, applied.rowCount ? 'applied' : 'ignored_stale']);\n});\n```\n\nWhy each part matters:\n\n- **Upsert, not update.** The refund arrives before any row exists. A plain `UPDATE` would match nothing and drop the refund, and the late renewal would then grant premium. Inserting an inactive row as a tombstone is what makes the scenario work.\n- **The `WHERE` on `DO UPDATE` is atomic.** Two workers racing on the same user cannot both win, and no read-then-write is involved.\n- **Tuple comparison `(time, event_id)`** gives a deterministic tiebreak when two events carry the same timestamp. The result no longer depends on arrival order.\n- **`FOR UPDATE` on the event row** makes job redelivery safe.\n- **`status` records `ignored_stale`**, so support can see why the late renewal did nothing.\n\n## Domain rules (`entitlement-rules.ts`)\n\nThe rules map each event to a desired state:\n\n- Purchase, renewal and restore set `is_active = true` with the event's `expires_at`.\n- Refund sets `is_active = false` and ends access immediately.\n- Cancellation keeps access until `expires_at`.\n- Expiry sets `is_active = false`.\n- Billing issue and grace period keep access until the grace end.\n\nVerify the exact event names and fields in the current Adapty docs before coding them. Do not hardcode them from memory.\n\nReads decide access with `is_active AND (expires_at IS NULL OR expires_at > now())`. Do not trust the `is_active` flag alone, because expiry needs no webhook that could be missed.\n\n## Edge cases and caveats\n\n- **A real renewal after the refund** (for example at 11:00, after a fresh purchase) has a newer time. It passes the guard and re-grants access, which is correct.\n- **Refund of an old transaction while a newer subscription is active.** Time ordering alone would revoke access wrongly. Compare the refunded transaction id with the one that last granted access. If they differ, ignore the refund or reconcile instead. This needs a `source_transaction_id` column. I'd add it, but the Adapty payload fields need checking first.\n- **Clock and time source.** Use Adapty's event time, not `received_at`. The skill file says to check timestamps only as the provider's contract defines them, so confirm that `event_datetime` is reliable for ordering.\n- **Missed enqueue.** A scheduled sweep picks up `pending` events older than a minute and runs the same use case.\n- **Sweep ordering.** The sweep may process events in any order. The guard makes that safe.\n- **Reconciliation.** A scheduled job fetches the profile's `access_levels` from the Adapty server API for active subscribers near expiry, and on a support request. It applies the result with a time guard set to the fetch time. This repairs any gap that ordering rules cannot see.\n- **Client flags.** Never grant premium from a client `isPremium`. The app calls `identify` with `users.id`, so the webhook maps straight to the user row.\n\n## Tests (real PostgreSQL, integration)\n\nEvery test goes through the route and the job, not the repository directly.\n\n1. Refund, then renewal: the entitlement is inactive, the renewal is `ignored_stale`, and the stored event time is 10:05.\n2. Refund, renewal, renewal again: same end state, one event row, and the second delivery is answered 200.\n3. Renewal then refund (normal order): inactive.\n4. Two workers process the refund and renewal concurrently: inactive, repeated 50 times.\n5. Same timestamp, different ids: the result is identical regardless of order.\n6. The same job run twice: a no-op.\n7. A real later renewal after the refund: active again.\n8. Wrong `Authorization` header: 401 and nothing stored.\n9. A crash after insert and before processing: the sweep applies the event.\n\nFor each, write the test first and watch it fail for the right reason. Test 1 should fail against a version with an `UPDATE` instead of the upsert. That is the regression this design exists to prevent."
+}

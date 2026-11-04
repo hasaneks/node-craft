@@ -1,0 +1,63 @@
+{
+  "id": "E11",
+  "title": "Account switch and an old push token",
+  "arm": "baseline",
+  "rep": 1,
+  "status": "graded",
+  "score": 9,
+  "max": 10,
+  "percent": 90,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch",
+    "node-craft-contract"
+  ],
+  "loadedSkills": [],
+  "turns": 2,
+  "seconds": 54,
+  "cost": 0.1208,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "devices.push_token is UNIQUE, the device id is the installation id, and a partial unique index allows one active binding per device. Registration clears the token from any other device and revokes the prior active binding, so the token is re-bound."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Registration is called with the user's access token and the request body has no user_id. The binding's user_id comes from the authenticated user ($user)."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "The design states it can't rely on the server hearing about the sign-out. Mehmet's registration revokes Ayşe's binding. The send query checks status='active' and recency. Client-side key destruction and a binding_id check also cover the offline window."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Sensitive pushes are data-only with an opaque notification_id and an encrypted blob. Full content is fetched through the authenticated GET endpoint."
+      },
+      "R5": {
+        "score": 1,
+        "reason": "A test for the account-switch and offline sign-out scenario is given. There is no cleanup of invalid tokens from FCM responses such as UNREGISTERED or NotRegistered."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Trusting a userId in the registration body",
+        "violated": false,
+        "evidence": "The register body is {device_id, platform, push_token, public_key}. The user comes from the access token."
+      },
+      {
+        "item": "Assuming the sign-out request always reaches the server",
+        "violated": false,
+        "evidence": "The design says the server can't rely on learning about the sign-out. It uses an outbox, supersede-on-register, and key destruction."
+      },
+      {
+        "item": "Putting appointment details in the push body",
+        "violated": false,
+        "evidence": "The payload is data-only, with an opaque id and an encrypted blob. The fallback text is generic."
+      }
+    ],
+    "summary": "Strong design that meets every forbidden-decision constraint and nearly every rubric item. Its one gap is that it never handles invalid FCM token cleanup.",
+    "cost": 0.0409532
+  },
+  "answer": "The working directory holds only a `.gitignore`, so this is a greenfield design. The file paths below are proposals, not edits to existing code.\n\n## The core problem\n\nA push token identifies an app install on a device, not a user. Offline sign-out can't tell the server anything, so the server keeps believing the tablet belongs to Ayşe until it hears otherwise. Between Ayşe's sign-out and Mehmet's sign-in the server will happily target that token. So the design can't rely on the server learning about the sign-out in time.\n\n## Decisions\n\n1. **Sensitive pushes carry no readable content.** The medical push goes out as a data-only message holding an opaque `notification_id`, a `binding_id` and an encrypted blob. The wire and OS tray never see \"your oncology appointment\". The generic fallback text is \"You have a new notification\". Reason: once a push is delivered, nothing server-side can recall it.\n\n2. **Push is addressed to a binding (user + device), not a device.** A `device_binding` is created at sign-in and carries its own keypair. Reason: \"who is this for\" becomes a checkable fact on the device.\n\n3. **The private key dies at sign-out, locally and offline.** The blob is encrypted to the binding's public key (HPKE or ECDH + AES-GCM). Sign-out destroys the private key in Keystore/Keychain. Even if the push arrives after Ayşe signed out and before Mehmet registers, nobody can decrypt it, and no network is needed for this. This is the guarantee that holds in the offline window.\n\n4. **The client checks the recipient before rendering.** The handler drops any message whose `binding_id` differs from the current local binding. On iOS this runs in a Notification Service Extension that reads the binding from an app-group keychain. The extension replaces the generic text, or shows nothing for data-only messages.\n\n5. **The server allows one active binding per device.** When Mehmet registers, the server atomically revokes Ayşe's binding, so later pushes never target her on that tablet.\n\n6. **Revocation works offline.** Before destroying the key, the client signs `revoke:<binding_id>` and stores it in an outbox. On reconnect it sends that signature, with no user token needed, since Ayşe's token may have expired. The server also rotates the push token: the client deletes the FCM/APNs token at sign-out, retrying if offline.\n\n7. **The server fails closed over time.** Sensitive pushes only go to bindings seen within N hours (`last_seen_at`). The tradeoff is that a legitimately offline user gets the notification at next sync instead of by push.\n\n## Data model (Postgres)\n\n```sql\nCREATE TABLE devices (\n  id               uuid PRIMARY KEY,            -- client-generated, kept in keychain\n  platform         text NOT NULL CHECK (platform IN ('ios','android')),\n  push_token       text UNIQUE,                 -- one token, one device\n  push_token_at    timestamptz,\n  last_seen_at     timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE device_bindings (\n  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  device_id      uuid NOT NULL REFERENCES devices(id),\n  user_id        uuid NOT NULL REFERENCES users(id),\n  public_key     bytea NOT NULL,               -- private half never leaves the device\n  status         text NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),\n  revoke_reason  text CHECK (revoke_reason IN ('sign_out','superseded','token_moved','admin')),\n  bound_at       timestamptz NOT NULL DEFAULT now(),\n  revoked_at     timestamptz,\n  last_seen_at   timestamptz NOT NULL DEFAULT now()\n);\n-- the invariant: at most one active user per physical device\nCREATE UNIQUE INDEX one_active_binding_per_device\n  ON device_bindings(device_id) WHERE status = 'active';\nCREATE INDEX bindings_user_active ON device_bindings(user_id) WHERE status = 'active';\n\nCREATE TABLE notifications (\n  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  user_id     uuid NOT NULL REFERENCES users(id),\n  kind        text NOT NULL,\n  sensitivity text NOT NULL DEFAULT 'normal' CHECK (sensitivity IN ('normal','sensitive')),\n  body        jsonb NOT NULL,                  -- full content, served only via authenticated API\n  created_at  timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE deliveries (\n  notification_id uuid REFERENCES notifications(id),\n  binding_id      uuid REFERENCES device_bindings(id),\n  status          text NOT NULL DEFAULT 'sent',\n  PRIMARY KEY (notification_id, binding_id)\n);\n```\n\n## API\n\n**`POST /v1/devices/register`** is called on every sign-in and token refresh, with the user's access token.\n\n```json\n{ \"device_id\": \"…\", \"platform\": \"android\", \"push_token\": \"…\", \"public_key\": \"base64…\" }\n```\n\nThe response is `{ \"binding_id\": \"…\" }`. In one transaction:\n\n```sql\nBEGIN;\n-- a token can belong to only one device (reinstall or restore)\nUPDATE devices SET push_token = NULL WHERE push_token = $token AND id <> $device;\nINSERT INTO devices (id, platform, push_token, push_token_at)\n  VALUES ($device, $platform, $token, now())\n  ON CONFLICT (id) DO UPDATE\n    SET push_token = EXCLUDED.push_token, push_token_at = now(), last_seen_at = now();\n-- Ayşe's binding dies the moment Mehmet registers\nUPDATE device_bindings\n   SET status='revoked', revoke_reason='superseded', revoked_at=now()\n WHERE device_id = $device AND status='active';\nINSERT INTO device_bindings (device_id, user_id, public_key)\n  VALUES ($device, $user, $pubkey) RETURNING id;\nCOMMIT;\n```\n\nRe-registering the same user is a rotation: the old binding is revoked and a new key is issued.\n\n**`POST /v1/bindings/{id}/revoke`** is called with `{ \"signature\": \"…\" }` and no bearer token. The server verifies the signature against `device_bindings.public_key`, then sets `status='revoked', revoke_reason='sign_out'`. The call is idempotent, so the outbox can retry safely. A normal online sign-out uses the same endpoint.\n\n**`GET /v1/notifications/{id}`** needs the user's bearer token and checks `notifications.user_id = auth.user`. The client uses it to fetch full content after a push. Mehmet's token can never read Ayşe's row, even if he obtained the id.\n\n## Send path\n\n```sql\nSELECT b.id AS binding_id, b.public_key, d.push_token, d.platform\nFROM device_bindings b JOIN devices d ON d.id = b.device_id\nWHERE b.user_id = $recipient\n  AND b.status = 'active'\n  AND d.push_token IS NOT NULL\n  AND ($sensitivity = 'normal' OR b.last_seen_at > now() - interval '24 hours');\n```\n\n```ts\n// per row; sensitive => data-only, no notification block, encrypted body\nconst blob = hpkeSeal(row.public_key, JSON.stringify({ title, body }));\nfcm.send({ token: row.push_token, data: { nid, bid: row.binding_id, blob } });\n```\n\n## Client rule\n\n```kotlin\nfun onPush(m: Map<String,String>) {\n  val b = BindingStore.current() ?: return          // signed out: drop\n  if (m[\"bid\"] != b.id) return                      // addressed to someone else: drop\n  val plain = Hpke.open(b.privateKey, m[\"blob\"]) ?: return  // key gone: drop\n  showNotification(plain)\n}\n```\n\nSign-out order matters:\n1. Sign the revoke message.\n2. Queue it in the outbox.\n3. Destroy the private key.\n4. Clear the local binding and delete the push token, retrying if offline.\n5. Clear the cached notifications and tray for that user.\n\n## Files I'd add\n\n- `db/migrations/001_device_bindings.sql` — the schema above.\n- `src/api/devices.ts` — `register` and `revoke` handlers.\n- `src/push/dispatch.ts` — the send query and encryption.\n- `src/push/crypto.ts` — HPKE seal on the server.\n- `app/push/PushHandler.kt` and `ios/NotificationServiceExtension/` — the recipient check and decryption.\n- `app/auth/SignOut.kt` — the sign-out order and revoke outbox.\n- `tests/push-isolation.test.ts` — the scenario below.\n\n## Test that proves it\n\n1. Ayşe registers and gets binding A.\n2. Ayşe signs out offline.\n3. Mehmet registers and gets binding B.\n4. Send a sensitive push to Ayşe. The query must return no rows for this tablet.\n5. Replay the push from step 4 straight to the client. It must be dropped, because the binding doesn't match and the key is gone.\n6. Skip step 3 and send anyway. The payload is undecryptable and shows only generic text.\n\n## Residual risks\n\n- **Generic text.** On iOS, a generic alert such as \"You have a new notification\" can still show on the tablet in the gap. It leaks that something arrived, but not what. Data-only pushes avoid even that, at the cost of less reliable delivery.\n- **Same app account.** If the family shares one account instead of per-person sign-in, none of this helps. The data model assumes distinct users.\n- **Lock screen.** Mark the notification's lock-screen visibility as private on Android."
+}

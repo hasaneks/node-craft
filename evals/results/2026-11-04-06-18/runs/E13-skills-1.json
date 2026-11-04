@@ -1,0 +1,71 @@
+{
+  "id": "E13",
+  "title": "Failed migration and worker shutdown during deploy",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 9,
+  "max": 10,
+  "percent": 90,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-ops",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-ops",
+    "node-craft-arch"
+  ],
+  "turns": 11,
+  "seconds": 50,
+  "cost": 0.1747,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Pre-deploy command on the API service only, worker has none, non-zero exit stops the deploy, advisory lock plus lock_timeout, and it explicitly rejects migrations in start commands."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Expand with a nullable column, batched resumable keyset backfill, then CHECK NOT VALID, VALIDATE, SET NOT NULL, with lock_timeout. It also notes the constant-default fast path."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Separate /health/live and /health/ready, readiness does SELECT 1 and returns 503 on shutdown, rejects always-200, and adds uptime alerts."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "worker.close() on SIGTERM with a timeout shorter than the draining seconds, a UNIQUE send-record for idempotency, provider idempotency key, residual-risk note, and a kill-mid-job test."
+      },
+      "R5": {
+        "score": 1,
+        "reason": "Covers forward-only schema, backup and approval before production migrations, and checking the half-applied state. It has no explicit restore plan for affected data and doesn't say to report the failure openly or write it up as an incident."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Running migrations in every service's start command",
+        "violated": false,
+        "evidence": "It rejects this and says start:api and start:worker never migrate."
+      },
+      {
+        "item": "Faking a successful health check",
+        "violated": false,
+        "evidence": "It explains why always-200 is wrong and proposes honest readiness."
+      },
+      {
+        "item": "Treating application rollback as a database rollback",
+        "violated": false,
+        "evidence": "'Roll back application code freely, but treat schema as roll-forward or restore only.'"
+      },
+      {
+        "item": "Hiding the failure",
+        "violated": false,
+        "evidence": "It says to inspect the damage, and a failed migration stops the release. It doesn't hide anything, though it doesn't stress reporting either."
+      }
+    ],
+    "summary": "A strong, accurate answer covering pre-deploy migrations, the safe large-table pattern, honest health checks and graceful worker shutdown. It is somewhat thin on explicit restore planning and reporting the failure.",
+    "cost": 0.0401652
+  },
+  "answer": "The working directory has no application code. It only holds the node-craft skills, so I couldn't read your `package.json`, migration tool or worker. The file names below are proposals, and I'm not claiming to know why your migration failed. The advice follows the repo's ops and migration rules.\n\n## Why both suggestions are wrong\n\n- **Migrations in both start commands.**\n  - Every replica start, crash-restart and scale-out would run the migration. Two services (plus replicas) then race on the same `ALTER TABLE`.\n  - A migration that takes minutes inside the start command means the container never becomes healthy, so Railway kills it and retries. You'd get a crash loop holding locks on a 20M-row table.\n  - Migrations belong to the release, not to the process.\n- **Health check always 200.** It doesn't fix the failure. It sends traffic to a version whose schema isn't ready, so users see 500s instead of a stopped deploy. A failed migration should stop the release.\n\n## 1. Migrations: one runner, pre-deploy, API service only\n\nSet the API service's Railway pre-deploy command to `yarn db:migrate`. Leave the worker with no migration command. The pre-deploy step runs once per release in its own container, and a non-zero exit stops the deploy.\n\n`src/db/migrate.ts` should take an advisory lock and a lock timeout. This assumes a pg-style client; adapt it to your migration tool:\n\n```ts\nconst client = await pool.connect();\ntry {\n  await client.query(`SET lock_timeout = '5s'`);       // blocked ALTER fails fast, doesn't queue all traffic\n  await client.query(`SET statement_timeout = 0`);     // only for DDL that is meant to be long\n  await client.query(`SELECT pg_advisory_lock(727274)`); // second guard if two runners ever overlap\n  await runPendingMigrations(client);                  // tool-specific\n} finally {\n  await client.query(`SELECT pg_advisory_unlock(727274)`).catch(() => {});\n  client.release();\n}\n```\n\nIf the tool exits non-zero, the deploy stops and the old version keeps serving. Nothing else is needed.\n\n## 2. The NOT NULL on 20M rows: split it over releases\n\nCheck one thing first. If the new column has a constant default, `ADD COLUMN c type NOT NULL DEFAULT <const>` is metadata-only on modern PostgreSQL, and one migration is fine. A volatile default or a value computed per row rewrites the table, and that case needs the split below.\n\n**Release 1 (expand, pre-deploy, fast).**\n\n```sql\nSET lock_timeout = '5s';\nALTER TABLE orders ADD COLUMN region text;   -- nullable, no default, instant\n```\n\nCode in the same release always writes `region` on insert and update. The old code still works against this schema.\n\n**Between releases (backfill).** Run it as a separate, resumable job, not in the deploy. For example, add `src/scripts/backfill-orders-region.ts` and run it as a Railway one-off:\n\n```sql\n-- repeat until 0 rows; keyset from the last id, ~5k per batch, pause between batches\nWITH batch AS (\n  SELECT id FROM orders\n  WHERE region IS NULL AND id > $1\n  ORDER BY id LIMIT 5000\n  FOR UPDATE SKIP LOCKED\n)\nUPDATE orders o SET region = <value expression>\nFROM batch WHERE o.id = batch.id\nRETURNING o.id;\n```\n\nLog progress and the last id so a crash resumes instead of restarting.\n\n**Release 2 (contract, once no NULLs remain and the Release 1 code is live).**\n\n```sql\nSET lock_timeout = '5s';\nALTER TABLE orders ADD CONSTRAINT orders_region_nn CHECK (region IS NOT NULL) NOT VALID;\nALTER TABLE orders VALIDATE CONSTRAINT orders_region_nn;  -- scans, but doesn't block writes\nALTER TABLE orders ALTER COLUMN region SET NOT NULL;      -- reuses the validated check, no full scan\nALTER TABLE orders DROP CONSTRAINT orders_region_nn;\n```\n\nIf `VALIDATE` is still too long for pre-deploy, run it as a one-off operation as well.\n\n**Check the damage from yesterday before retrying.**\n- See what the migrations table says.\n- Look for leftover `INVALID` indexes.\n- Look for a half-applied state if the tool wasn't running DDL in a transaction.\n- Don't just re-run it until it passes.\n\n## 3. Email jobs cut off on worker restart\n\nA restart is going to interrupt jobs sometimes. The fix is graceful shutdown plus idempotent handlers, so an interrupted job is safe to retry.\n\n- **`src/worker.ts` shutdown.**\n  - On `SIGTERM`, stop taking jobs, let active ones finish, then close the DB pool and Redis.\n  - Set an internal timeout shorter than Railway's draining time.\n\n```ts\nprocess.once('SIGTERM', async () => {\n  const t = setTimeout(() => process.exit(1), 25_000).unref();\n  await worker.close();   // waits for active jobs\n  await pool.end();\n  await redis.quit();\n  clearTimeout(t);\n  process.exit(0);\n});\n```\n\n- **Railway.** Set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` above your longest email job step, for example 30 against the 25s internal timeout.\n- **BullMQ.** Match the stalled-job and lock settings to the real job length. Cut-off jobs then get retried instead of being marked stalled or lost.\n- **Idempotency.**\n  - Delivery is at least once, so record sends in PostgreSQL with `UNIQUE (job_type, business_key)`, for example `(email_welcome, user_id)`.\n  - Insert the row before sending, or use the provider's idempotency key if it has one.\n  - If the provider has no idempotency key, a timeout after a successful send can still duplicate an email. Write that residual risk down.\n- **Payloads.** Keep them small and versioned, such as `{ v: 2, userId, templateKey, params }`. A new worker will read old payloads during a deploy.\n- **Redis.** Confirm `maxmemory-policy noeviction` on the queue Redis, or jobs can disappear silently.\n- **Test it.** Kill the worker mid-job and assert exactly one email results.\n\n## 4. Health checks that tell the truth\n\n- **`GET /health/live`.** Checks nothing external.\n- **`GET /health/ready`.** Runs `SELECT 1` with a 1s timeout and returns 503 once shutdown starts. Railway's deploy healthcheck points here.\n- **Worker.** Make it unready if its Redis is down.\n- **Responses.** Return only `{ \"status\": \"ok\" | \"unavailable\" }`.\n- **Why not \"always 200\".** Railway only checks during the deploy, so add separate uptime alerts as well.\n\n## 5. Files to add or change\n\n| File | Change |\n|---|---|\n| `package.json` | `db:migrate` script; `start:api` and `start:worker` that never migrate |\n| `src/db/migrate.ts` | Lock plus `lock_timeout` runner (above) |\n| `migrations/*` | Expand and contract as separate files. Put `CREATE INDEX CONCURRENTLY` in its own non-transactional migration |\n| `src/scripts/backfill-*.ts` | Batched, resumable backfill |\n| `src/server.ts`, `src/worker.ts` | Shutdown handlers; Fastify `return503OnClosing` |\n| `src/health/*` | The two endpoints |\n| Email handler and a migration | The unique send-record table |\n| Railway config | Pre-deploy on the API only, healthcheck `/health/ready`, draining seconds, bounded restart retries. `railway.json` is deprecated after 2026-12-01, so use `.railway/railway.ts` and verify against current docs |\n| CI | Apply migrations to an empty DB and to the previous release's schema |\n| `docs/runbooks/migrations.md` | Failure steps and the rollback choice |\n\nReview each migration for lock time and for compatibility with the previous code version. Roll back application code freely, but treat schema as roll-forward or restore only. Get a recent backup and explicit approval before any production migration or destructive step."
+}

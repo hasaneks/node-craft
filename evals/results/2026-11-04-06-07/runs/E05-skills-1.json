@@ -1,0 +1,84 @@
+{
+  "id": "E05",
+  "title": "Working together with an rn-craft React Native app",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 16,
+  "max": 16,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-contract",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-contract",
+    "rn-craft-arch",
+    "node-craft-arch"
+  ],
+  "turns": 24,
+  "seconds": 68,
+  "cost": 0.3233,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "A single baseQuery sets Authorization with the Firebase ID token and X-App-Locale from i18n.language, and adds a 401 refresh."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The ApiError union keeps code, requestId and retryAfter, and adds conflict and rateLimited. Status is kept only on the server kind, but the answer maps each status to a kind. The answer notes that rn-craft's current ApiError has no code, 409 or 429."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "details[].field is mapped to fields and then to setError, with setFocus, a root fallback and a shared applyApiErrors helper."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "It uses an infiniteQuery with getNextPageParam on meta.nextCursor and flattens pages' data. It covers hasMore, an opaque cursor and INVALID_CURSOR."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "The backend users.id is used for Adapty identify and analytics, and the Firebase uid stays on the auth side. Premium comes from GET /me, backed by entitlements fed by the Adapty webhook."
+      },
+      "R6": {
+        "score": 2,
+        "reason": "The device is unlinked before resetSession clears state and signs out. The backend re-binds tokens on account switch, and the unlink is best effort."
+      },
+      "R7": {
+        "score": 2,
+        "reason": "One key is created per user action with useRef and reused on retries. A new key is made only after success, a definite failure or an edit. Retries are limited to safe cases, and the backend replay and fingerprint behaviour is described."
+      },
+      "R8": {
+        "score": 2,
+        "reason": "It says the companion guide is not merged, that everything is something to add, that nothing was run, and that the current ApiError lacks code, 409 and 429."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Making rn-craft a dependency of the backend or the backend a dependency of the app",
+        "violated": false,
+        "evidence": "The app and backend are designed as separate sides that meet only through the HTTP contract."
+      },
+      {
+        "item": "Trusting isPremium or userId from the client",
+        "violated": false,
+        "evidence": "It states that userId, isPremium and tenantId in a body, query or header are data and never authority. Entitlements come from the server."
+      },
+      {
+        "item": "Generating a new idempotency key on each retry",
+        "violated": false,
+        "evidence": "The key is created once per action with useRef and reused for automatic retries."
+      },
+      {
+        "item": "Claiming rn-craft already supports these headers or error cases",
+        "violated": false,
+        "evidence": "It says the companion guide is not merged and that the current rn-craft ApiError has no code, 409 or 429."
+      }
+    ],
+    "summary": "The answer covers every rubric area correctly, is honest about rn-craft's gaps, and violates none of the forbidden decisions.",
+    "cost": 0.0525732
+  },
+  "answer": "The working directory only holds the node-craft and rn-craft skills, with no app or backend code. So this is a design from those skills plus `docs/compatibility/rn-craft.md`, not a change to a real project. That companion guide is not merged into rn-craft (its patch is only proposed), so everything below is something you add to the app. I haven't run any of it.\n\n## 1. `baseQuery`: language and error mapping\n\n**Decision:** one `baseQuery` does all of it, so no screen touches headers or raw errors.\n- The `X-App-Locale` header comes from `i18n.language`. The backend picks the locale in this order: header, then saved profile, then `Accept-Language`, then `en`.\n- The header never writes the profile. When the user picks a language, the app also calls `PATCH /me { preferredLocale }`, so push and email follow the same language.\n- Screens branch on `code` and `fields`, never on `message`.\n\nFiles: `src/app/store/api.ts` (the base query and `createApi`), `src/shared/api/apiError.ts` (the `ApiError` type and `toApiError`).\n\n```ts\nexport type ApiError =\n  | { kind: 'network' }\n  | { kind: 'unauthorized'; code: string; requestId?: string }\n  | { kind: 'forbidden'; code: string; requestId?: string }\n  | { kind: 'notFound'; code: string; requestId?: string }\n  | { kind: 'validation'; code: string; message: string; fields: Record<string, { code: string; message: string }>; requestId?: string }\n  | { kind: 'conflict'; code: string; message: string; retryAfter?: number; requestId?: string }\n  | { kind: 'rateLimited'; code: string; retryAfter?: number; requestId?: string }\n  | { kind: 'server'; status: number; code: string; retryAfter?: number; requestId?: string };\n\nconst raw = fetchBaseQuery({\n  baseUrl: config.apiUrl, timeout: 15_000,\n  prepareHeaders: async (h) => {\n    const token = await auth.currentUser?.getIdToken();   // the SDK caches and refreshes\n    if (token) h.set('Authorization', `Bearer ${token}`);\n    h.set('X-App-Locale', i18n.language);\n    h.set('X-App-Version', appVersion);\n    return h;\n  },\n});\n\nexport const baseQuery: BaseQueryFn<string | FetchArgs, unknown, ApiError> = async (args, api, extra) => {\n  let res = await raw(args, api, extra);\n  if (res.error?.status === 401 && code(res.error) === 'AUTH_INVALID') {\n    await auth.currentUser?.getIdToken(true);             // refresh once, retry once\n    res = await raw(args, api, extra);\n  }\n  if (!res.error) return res;\n  const err = toApiError(res.error, res.meta?.response);\n  if (err.kind === 'unauthorized' && ['AUTH_REVOKED', 'ACCOUNT_DELETED'].includes(err.code)) void resetSession();\n  return { error: err };\n};\n```\n\n`toApiError` is the function in the companion guide. It handles these cases:\n- `FETCH_ERROR` and `TIMEOUT_ERROR` become `network`.\n- 400 becomes `validation`, with `details[]` turned into `fields`.\n- 401, 403 and 404 become their own kinds.\n- 409 becomes `conflict` and 429 becomes `rateLimited`. Both keep `retryAfter`.\n- Anything else becomes `server`.\n- Every case keeps `code`. `requestId` comes from `body.requestId` or the `x-request-id` header.\n\nThis differs from rn-craft's current `ApiError`, which has no `code` and no 409 or 429 cases.\n\nOther client rules:\n- A second 401 after the single refresh signs the user out.\n- The `retry` wrapper applies only to reads, plus 503 and 429 using `Retry-After`, with 2–3 attempts. Never stack retries across layers.\n- On a language change, invalidate or refetch cached backend text (server-localized lists). Otherwise the cached text stays in the old language.\n\n## 2. Field errors into react-hook-form\n\nThe backend sends `details: [{ field: \"items.0.quantity\", code, message }]`. The field path matches react-hook-form's dotted names, so no translation is needed.\n\n```ts\nconst [createOrder] = useCreateOrderMutation();\nconst onSubmit = handleSubmit(async (values) => {\n  const r = await createOrder({ body: values, idempotencyKey: key.current });\n  if (!('error' in r)) return;\n  const e = r.error as ApiError;\n  if (e.kind === 'validation') {\n    for (const [f, d] of Object.entries(e.fields)) setError(f as FieldPath<Form>, { type: d.code, message: d.message });\n    setFocus(Object.keys(e.fields)[0] as FieldPath<Form>);\n    if (!Object.keys(e.fields).length) setError('root', { message: e.message });\n  }\n});\n```\n\n- The message is already in the user's language. An app that prefers its own copy maps `d.code` to an i18next key instead.\n- Put this in one helper, `applyApiErrors(e, setError)`, in `src/shared/forms`, so every form behaves the same.\n- A field path that matches no input goes to `root`, not silently dropped.\n\n## 3. Lists and pagination\n\nThe backend returns `{ data: [...], meta: { nextCursor, hasMore, limit } }`. The cursor is opaque, `limit` is 20 by default and 100 at most, and `nextCursor` is `null` on the last page.\n\n```ts\ngetOrders: build.infiniteQuery<OrdersPage, { status?: string }, string | null>({\n  infiniteQueryOptions: { initialPageParam: null, getNextPageParam: (last) => last.meta.nextCursor },\n  query: ({ queryArg, pageParam }) => ({ url: '/orders', params: { limit: 20, ...queryArg, ...(pageParam ? { cursor: pageParam } : {}) } }),\n}),\n// screen: const items = data?.pages.flatMap((p) => p.data) ?? [];\n// FlatList onEndReached → hasNextPage && !isFetchingNextPage && fetchNextPage()\n```\n\n- Never build or parse a cursor on the client. A cursor is tied to its sort and filters, so changing a filter is a new query arg and starts from page one.\n- `INVALID_CURSOR` (400) means refetch from the first page.\n- A page error keeps the loaded rows and shows retry at the end of the list. Do not expect a `total`, because `hasMore` is the contract.\n- Ids stay strings, and money arrives as decimal strings or minor units, so don't `Number()` them.\n\nBackend query, with `ORDER BY created_at DESC, id DESC` backed by an index on `(tenant_id, created_at DESC, id DESC)`:\n\n```sql\nSELECT id, created_at, total FROM orders\nWHERE user_id = $1 AND (created_at, id) < ($2, $3)\nORDER BY created_at DESC, id DESC\nLIMIT $4 + 1;   -- the extra row sets hasMore\n```\n\n## 4. Identity mapping\n\n| Id | Where it lives | Used for |\n|---|---|---|\n| Firebase `uid` | Auth only | The backend looks up `users.firebase_uid` (`UNIQUE NOT NULL`) after `verifyIdToken` |\n| Backend `users.id` | Returned by `GET /me` | API paths, analytics `setUserId`, Adapty `identify`, logs |\n| Adapty customer user id | Set to `users.id` | Webhooks map directly to a user |\n\n**Backend:**\n- Provision the user on the first verified request with `INSERT … ON CONFLICT (firebase_uid) DO NOTHING RETURNING …`, then select. Two concurrent first requests then create one user.\n- Ids in a body, query or header (`userId`, `isPremium`, `tenantId`) are data, never authority.\n- Entitlements are stored in an `entitlements` table, updated from the Adapty webhook and its server API, and read through `GET /me`. Update with `WHERE source_event_at < $eventTime` so a late event can't revert newer state.\n- Deduplicate webhooks on `profile_event_id`, using `UNIQUE (provider, event_id)`.\n\n**Sign-in sequence on the app:**\n1. Firebase sign-in.\n2. `GET /me`.\n3. `purchases.identify(me.id)`.\n4. `analytics.setUserId(me.id)`.\n5. `PUT /me/devices/{installationId}`.\n\nPremium access that the app enforces comes from `GET /me`. The Adapty profile only drives paywall display.\n\n## 5. Push tokens and sign-out\n\n**Backend:**\n\n```sql\nCREATE TABLE push_devices (\n  id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,\n  installation_id text NOT NULL, fcm_token text NOT NULL,\n  platform text NOT NULL CHECK (platform IN ('ios','android','web')),\n  locale text, updated_at timestamptz NOT NULL DEFAULT now(),\n  UNIQUE (installation_id), UNIQUE (fcm_token));\n```\n\n- `PUT /me/devices/{installationId}` upserts by installation and by token. The user comes from the ID token, never the body.\n- A token that moves to another user is re-bound, so the old account stops receiving on that device.\n- `DELETE /me/devices/{installationId}` is idempotent.\n- Sends always read the current binding.\n- Delete a token when FCM reports it unregistered.\n- Push payloads carry an id and a template key, with no sensitive data. The recipient's locale is resolved at send time.\n\n**App:** `src/shared/services/session/resetSession.ts`, one function for sign-out, account switch and deletion.\n\n```ts\nexport async function resetSession() {\n  await withTimeout(unlinkDevice(installationId), 3000).catch(log);  // needs the token, so first\n  analytics.setUserId(null); crash.setUserId('');\n  await purchases.logout().catch(log);\n  store.dispatch(api.util.resetApiState());\n  dispatch(resetUserSlices()); userStorage.clearAll(); secureStorage.clearAll();\n  await auth.signOut();\n}\n```\n\n- The unlink call must run before `auth.signOut()`, because it needs the ID token.\n- The unlink is best effort. If the device is offline, the backend's re-bind on the next registration covers it.\n- Also call `PUT` again on `onTokenRefresh`.\n- Do not clear `deviceStorage`, which holds language and theme.\n\n## 6. Safe retries of \"create order\"\n\n**Contract:** `POST /orders` with `Idempotency-Key: <uuid>`, required on that endpoint. A missing key gets 400 `IDEMPOTENCY_KEY_REQUIRED`.\n\n| Case | Response |\n|---|---|\n| First request | 201 |\n| Repeat with the same key and payload | The stored status and body, plus `Idempotency-Replayed: true` |\n| Repeat while the first is running | 409 `IDEMPOTENCY_IN_PROGRESS`, `Retry-After: 1` |\n| Same key, different payload | 409 `IDEMPOTENCY_KEY_REUSED`, and the new payload is not executed |\n\n**Backend:** the key row and the order are written in one transaction.\n1. Hash the normalized request (method, route, canonical body) into a fingerprint.\n2. Start the transaction and set `lock_timeout`.\n3. Insert the key row with `ON CONFLICT DO NOTHING`. A concurrent duplicate waits on the unique index.\n4. If the first transaction commits, the duplicate looks the key up and replays the stored response. If it rolls back, the duplicate proceeds as the first request. If the wait exceeds the lock timeout, answer 409 `IDEMPOTENCY_IN_PROGRESS`.\n5. Write the order and the outbox row, store the response on the key row, and commit.\n\nA failed attempt rolls back the key row, so it doesn't use up the key. Do no provider calls inside the transaction. Any call after commit uses an idempotency key derived from the same key, driven by the outbox. Keep keys for 24 hours to 7 days and purge them in a scheduled job.\n\n```sql\nCREATE TABLE idempotency_keys (\n  tenant_id uuid NOT NULL, user_id uuid NOT NULL, operation text NOT NULL,\n  key text NOT NULL CHECK (char_length(key) BETWEEN 8 AND 255),\n  fingerprint text NOT NULL, response_code int NOT NULL, response_body jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  PRIMARY KEY (tenant_id, user_id, operation, key));\n```\n\n**App:**\n- Create the key with `useRef(uuid())` when the user starts the action, and send it as the `Idempotency-Key` header.\n- Reuse the same key for the automatic retries described below.\n- Make a new key after a 201, or after a definite failure the user must fix (400, 403, 404, or a 409 other than `IDEMPOTENCY_IN_PROGRESS`). If the user edits the form, also make a new key. Otherwise the changed payload gets `IDEMPOTENCY_KEY_REUSED`.\n\nRetry rules:\n- Retry automatically only on network or timeout errors, 503, 429 (after `Retry-After`) and `IDEMPOTENCY_IN_PROGRESS`.\n- Never retry other 409s, 400, 403 or 404.\n- A 500 or timeout on a create that carries a key is safe to resend with the same key.\n- Disable the submit button while the call runs.\n- Don't add optimistic list items. The 201 is the only proof of success.\n- Skip a persistent offline write queue unless the product needs one.\n\n## Where the changes go\n\n**App:**\n- `src/app/store/api.ts`\n- `src/shared/api/apiError.ts`\n- `src/shared/forms/applyApiErrors.ts`\n- `src/shared/services/session/resetSession.ts`\n- `src/shared/services/messaging` (device registration)\n- `src/shared/services/purchases` (`identify(me.id)`)\n- The orders feature's endpoints and screens\n- `STACK.md`: record the id mapping and the idempotency policy\n\n**Backend:**\n- Migrations for `users.firebase_uid`, `push_devices`, `idempotency_keys` and `entitlements`\n- The error handler and registry\n- A locale hook that runs before validation\n- The `/me`, `/me/devices` and `/orders` modules\n- The Adapty webhook module\n- An OpenAPI regeneration check in CI\n\n**Tests:**\n- Backend:\n  - The same key twice, sequentially and concurrently, plus the same key with a different payload, on real PostgreSQL.\n  - A Turkish validation error with codes unchanged.\n  - Another user's order returns 404.\n  - A push after account switch must not reach the old account.\n- App:\n  - `toApiError` for each status.\n  - Form errors set per field.\n  - `resetSession` order."
+}

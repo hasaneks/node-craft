@@ -1,0 +1,68 @@
+{
+  "id": "E09",
+  "title": "Out-of-order subscription webhooks",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 12,
+  "max": 12,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-arch"
+  ],
+  "turns": 6,
+  "seconds": 48,
+  "cost": 0.1548,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Authenticates with a constant-time compare of the Authorization header, which is Adapty's documented method, and does not invent an HMAC. Stores the raw payload under PRIMARY KEY (provider, event_id) using profile_event_id."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Stores the event, returns 200, and processes in a queued job. A sweeper picks up pending rows. It notes Adapty's 10s retry timeout."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Uses per-transaction facts with a sticky refunded_at and a GREATEST monotonic merge, plus a source_event_at guard and a per-user lock. The late renewal cannot restore access. It is not a literal compare-and-skip on event time, but the design is order-independent and correct for the scenario."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Unique event id with ON CONFLICT DO NOTHING, plus an idempotent merge as a second layer. It explicitly rejects an in-memory Set or a BullMQ jobId as the dedup mechanism."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Entitlements are a server-side projection keyed by user_id. It reconciles against the Adapty server API's access_levels, both on demand and on a schedule. The client-trust point is only implicit, since the server is the source, but that is adequate."
+      },
+      "R6": {
+        "score": 2,
+        "reason": "Tests cover refund-then-renewal in both orders, duplicate delivery both sequential and concurrent, a late refund for an old transaction, concurrency, 401 on a bad header, and reconciliation."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Applying events in arrival order without a time or version check",
+        "violated": false,
+        "evidence": "Uses a sticky refunded_at, a GREATEST last_event_at, and a source_event_at guard, so the result does not depend on arrival order."
+      },
+      {
+        "item": "Granting premium from the mobile client",
+        "violated": false,
+        "evidence": "Entitlements are derived on the server from webhook facts and reconciled with the Adapty server API. The client is never a grant source."
+      },
+      {
+        "item": "Assuming every provider signs webhooks the same way (e.g. inventing an HMAC signature for Adapty)",
+        "violated": false,
+        "evidence": "Uses the Authorization header with a constant-time compare and says to verify field names against the Adapty docs."
+      }
+    ],
+    "summary": "A strong, correct design that meets every rubric item and violates no forbidden decision.",
+    "cost": 0.0423312
+  },
+  "answer": "The working directory has no application code. It holds only the `.claude/skills/node-craft*` files, so I designed this against the repo's own rules in `node-craft-arch/references/webhooks-adapty.md` and `transactions-idempotency.md`. The file paths below are proposals. Check the Adapty event names and field names (`profile_event_id`, event time, transaction id) against the current Adapty docs before coding them.\n\n## Decisions and reasons\n\n1. **Store the event first, deduplicate on the provider's event id.**\n   - The webhook table has `PRIMARY KEY (provider, event_id)` with `event_id = profile_event_id`.\n   - The handler runs `INSERT ... ON CONFLICT DO NOTHING`. If no row was inserted, it returns 200 and stops.\n   - This is what stops the double renewal delivery. An in-memory `Set` or a BullMQ `jobId` would not survive a restart or a second replica.\n\n2. **Keep per-transaction facts. Derive the entitlement from them.**\n   - A single \"last event wins\" row is not enough. A refund for an old transaction can arrive after a newer legitimate renewal.\n   - So I store one row per store transaction, and a refund sets a sticky `refunded_at` that no later event can clear.\n   - The result no longer depends on arrival order. The refund-first case works the same way as the in-order case.\n\n3. **Treat the entitlement row as a projection.**\n   - It is recomputed from the facts inside the same transaction as each write.\n   - It keeps the `source_event_at` guard from the repo rule as a second line of defence.\n\n4. **Serialize writes per user.**\n   - Use `pg_advisory_xact_lock(hashtext(user_id))` or `SELECT ... FOR UPDATE` on the user.\n   - Two concurrent webhooks for the same user cannot interleave their recompute step.\n\n5. **Acknowledge fast and do the work after commit.**\n   - Store the event, return 2xx, then process it in a job. Adapty retries slow replies after 10 seconds.\n   - Processing is its own short transaction with no provider call inside. Any push or email goes through the outbox.\n\n6. **Reconcile as a backstop.**\n   - On a mismatch or a support ticket, fetch the profile's `access_levels` from the Adapty server API and correct the row.\n   - Also run a scheduled check for subscribers near expiry. This covers a refund event that cannot be matched to a transaction.\n\n## Files to add or change\n\n```\nsrc/modules/billing/\n  http/adapty-webhook.route.ts        # auth (constant-time Authorization compare), store event, 200\n  application/process-adapty-event.ts # use case: owns the transaction\n  domain/entitlement.ts               # pure isActive(transactions, now)\n  infrastructure/adapty-event-mapper.ts  # raw payload -> internal event (purchase|renewal|refund|...)\n  infrastructure/adapty-api.ts        # reconciliation client\n  jobs/process-adapty-event.job.ts\n  jobs/reconcile-entitlements.job.ts\nmigrations/00xx_billing.sql\ntests/billing/*.integration.test.ts   # real PostgreSQL\n```\n\n## Schema\n\n```sql\nCREATE TABLE webhook_events (\n  provider text NOT NULL, event_id text NOT NULL, event_type text NOT NULL,\n  subject_id text, occurred_at timestamptz,\n  received_at timestamptz NOT NULL DEFAULT now(),\n  processed_at timestamptz, status text NOT NULL DEFAULT 'pending',\n  payload jsonb NOT NULL,               -- minimized, no secrets\n  PRIMARY KEY (provider, event_id)\n);\n\nCREATE TABLE subscription_transactions (\n  user_id        uuid NOT NULL REFERENCES users(id),\n  provider       text NOT NULL,\n  transaction_id text NOT NULL,\n  access_level   text NOT NULL,\n  starts_at      timestamptz,\n  expires_at     timestamptz,           -- NULL until a purchase/renewal event is seen\n  refunded_at    timestamptz,           -- sticky\n  last_event_at  timestamptz NOT NULL,\n  PRIMARY KEY (provider, transaction_id)\n);\nCREATE INDEX ON subscription_transactions (user_id, access_level);\n\nCREATE TABLE entitlements (\n  user_id uuid NOT NULL, access_level text NOT NULL,\n  is_active boolean NOT NULL, expires_at timestamptz,\n  source_event_at timestamptz NOT NULL,\n  PRIMARY KEY (user_id, access_level)   -- the UNIQUE the repo rule asks for\n);\n```\n\n## Handler\n\n```ts\n// route: persist, ack\nconst ins = await db.query(\n  `INSERT INTO webhook_events (provider,event_id,event_type,subject_id,occurred_at,payload)\n   VALUES ('adapty',$1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, [...]);\nif (ins.rowCount === 1) await queue.add('adapty-event', { eventId });  // redelivery is harmless\nreturn reply.code(200).send();\n```\n\nEnqueueing is only a speed-up. A sweeper job also picks up rows where `status='pending'`, so a lost job cannot lose an event.\n\n## Use case, one transaction\n\n```sql\n-- 0. serialize per user\nSELECT pg_advisory_xact_lock(hashtext($user_id));\n\n-- 1. apply the fact; monotonic merge, order-independent\nINSERT INTO subscription_transactions\n  (user_id, provider, transaction_id, access_level, starts_at, expires_at, refunded_at, last_event_at)\nVALUES ($user,'adapty',$tx,$level,$starts,$expires,$refunded,$event_at)\nON CONFLICT (provider, transaction_id) DO UPDATE SET\n  starts_at     = COALESCE(EXCLUDED.starts_at,  subscription_transactions.starts_at),\n  expires_at    = COALESCE(EXCLUDED.expires_at, subscription_transactions.expires_at),\n  refunded_at   = COALESCE(subscription_transactions.refunded_at, EXCLUDED.refunded_at),  -- never cleared\n  last_event_at = GREATEST(subscription_transactions.last_event_at, EXCLUDED.last_event_at);\n\n-- 2. recompute the projection from facts\nINSERT INTO entitlements (user_id, access_level, is_active, expires_at, source_event_at)\nSELECT $user, $level,\n       COALESCE(bool_or(refunded_at IS NULL AND expires_at > now()), false),\n       max(expires_at) FILTER (WHERE refunded_at IS NULL),\n       $event_at\nFROM subscription_transactions WHERE user_id=$user AND access_level=$level\nON CONFLICT (user_id, access_level) DO UPDATE SET\n  is_active = EXCLUDED.is_active, expires_at = EXCLUDED.expires_at,\n  source_event_at = GREATEST(entitlements.source_event_at, EXCLUDED.source_event_at);\n\n-- 3. mark processed\nUPDATE webhook_events SET status='processed', processed_at=now()\nWHERE provider='adapty' AND event_id=$id;\n```\n\nThe caller runs this in a transaction with `lock_timeout` and `statement_timeout` set. It retries the whole transaction a bounded number of times on `40P01` or `40001`.\n\n## Your scenario, step by step\n\n| Arrival | Effect |\n|---|---|\n| Refund (10:05) first | The transaction row is created with `refunded_at=10:05` and `expires_at=NULL`. The recompute gives `is_active=false`. |\n| Renewal (10:00) second | `expires_at` is filled in, but `refunded_at` is kept. The recompute gives `is_active=false`. |\n| Renewal again | The `webhook_events` insert hits the conflict and returns 200 with no work. Even if it did get through, the merge changes nothing. |\n\nThe user ends without premium. A genuine later renewal (a new transaction id) would correctly turn access on again.\n\n## Tests (real PostgreSQL)\n\n- Refund then renewal, and renewal then refund. Both end with `is_active=false`.\n- The renewal delivered twice, sequentially and concurrently. There is one `webhook_events` row, and the facts are unchanged.\n- A refund for an old transaction arrives after a newer renewal. The newer transaction keeps access.\n- Rollback mid-use-case leaves neither a fact row nor a `processed` status.\n- Two concurrent events for the same user end in a state equal to a serial run.\n- A bad or missing `Authorization` header gets 401 and stores nothing.\n- Reconciliation corrects a deliberately wrong entitlements row.\n\n## Open points\n\n- If the refund payload does not carry the transaction id of the renewal, step 1 cannot target the right row. Fall back to the guarded `source_event_at` rule and rely on reconciliation. Confirm this in the Adapty docs.\n- The tie rule when two events have equal timestamps. Because `refunded_at` is sticky, a refund wins ties by construction."
+}

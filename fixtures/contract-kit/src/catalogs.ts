@@ -1,0 +1,43 @@
+import type { Catalogs } from './i18n.ts';
+
+// In a real service these live in src/shared/i18n/locales/<locale>/<namespace>.json.
+export const catalogs = {
+  en: {
+    'errors.VALIDATION_ERROR': 'Please check the highlighted fields.',
+    'errors.AUTH_REQUIRED': 'Please sign in to continue.',
+    'errors.FORBIDDEN': 'You do not have access to this.',
+    'errors.RESOURCE_NOT_FOUND': 'We could not find what you were looking for.',
+    'errors.CONFLICT': 'This was changed by someone else. Refresh and try again.',
+    'errors.IDEMPOTENCY_KEY_REUSED': 'This request was already used for a different action.',
+    'errors.IDEMPOTENCY_IN_PROGRESS': 'This request is still being processed.',
+    'errors.INVALID_CURSOR': 'The list position is no longer valid. Start from the first page.',
+    'errors.RATE_LIMITED': 'Too many attempts. Please wait a moment.',
+    'errors.SERVICE_UNAVAILABLE': 'The service is temporarily unavailable. Please try again shortly.',
+    'errors.INTERNAL_ERROR': 'Something went wrong. Please try again.',
+    'validation.INVALID_EMAIL': 'Enter a valid email address.',
+    'validation.REQUIRED': 'This field is required.',
+    'validation.TOO_LONG': 'This is too long.',
+    'validation.OUT_OF_RANGE': 'This value is out of range.',
+    'validation.INVALID_VALUE': 'This value is not valid.',
+    'validation.UNKNOWN_FIELD': 'This field is not accepted.',
+  },
+  tr: {
+    'errors.VALIDATION_ERROR': 'Lütfen işaretli alanları kontrol edin.',
+    'errors.AUTH_REQUIRED': 'Devam etmek için giriş yapın.',
+    'errors.FORBIDDEN': 'Buna erişim izniniz yok.',
+    'errors.RESOURCE_NOT_FOUND': 'Aradığınızı bulamadık.',
+    'errors.CONFLICT': 'Bu kayıt başka biri tarafından değiştirildi. Yenileyip tekrar deneyin.',
+    'errors.IDEMPOTENCY_KEY_REUSED': 'Bu istek farklı bir işlem için zaten kullanıldı.',
+    'errors.IDEMPOTENCY_IN_PROGRESS': 'Bu istek hâlâ işleniyor.',
+    'errors.INVALID_CURSOR': 'Liste konumu artık geçerli değil. İlk sayfadan başlayın.',
+    'errors.RATE_LIMITED': 'Çok fazla deneme yapıldı. Lütfen biraz bekleyin.',
+    'errors.SERVICE_UNAVAILABLE': 'Hizmet geçici olarak kullanılamıyor. Lütfen birazdan tekrar deneyin.',
+    'errors.INTERNAL_ERROR': 'Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.',
+    'validation.INVALID_EMAIL': 'Geçerli bir e-posta adresi girin.',
+    'validation.REQUIRED': 'Bu alan zorunludur.',
+    'validation.TOO_LONG': 'Bu değer çok uzun.',
+    'validation.OUT_OF_RANGE': 'Bu değer izin verilen aralığın dışında.',
+    'validation.INVALID_VALUE': 'Bu değer geçerli değil.',
+    'validation.UNKNOWN_FIELD': 'Bu alan kabul edilmiyor.',
+  },
+} satisfies Catalogs;
