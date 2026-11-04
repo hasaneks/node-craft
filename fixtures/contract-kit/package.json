@@ -1,0 +1,30 @@
+{
+  "name": "node-craft-contract-kit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tested reference code quoted by the node-craft skills: locale resolution, error envelope, cursor pagination, idempotent writes and a transactional outbox on real PostgreSQL.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node --test 'test/*.unit.test.ts'",
+    "test:integration": "node --test --test-concurrency=1 'test/*.int.test.ts'",
+    "test": "yarn test:unit && yarn test:integration"
+  },
+  "packageManager": "yarn@4.18.1",
+  "dependencies": {
+    "@fastify/type-provider-typebox": "6.3.0",
+    "fastify": "5.12.8",
+    "pg": "8.23.1",
+    "typebox": "1.4.3"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "12.2.1",
+    "@types/node": "26.6.6",
+    "@types/pg": "8.23.1",
+    "typescript": "7.0.2"
+  }
+}

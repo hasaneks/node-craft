@@ -1,0 +1,20 @@
+{
+  "name": "node-craft",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent skills for building Node.js and TypeScript backends: project setup, architecture, API contracts, fixes, performance and operations.",
+  "author": "Hasan Ekşi",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hasaneks/node-craft.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "evals": "node evals/run.mjs"
+  }
+}

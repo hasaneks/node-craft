@@ -1,0 +1,62 @@
+{
+  "id": "E10",
+  "title": "Language change before a queued notification",
+  "arm": "baseline",
+  "rep": 1,
+  "status": "graded",
+  "score": 8,
+  "max": 10,
+  "percent": 80,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch"
+  ],
+  "loadedSkills": [],
+  "turns": 3,
+  "seconds": 32,
+  "cost": 0.0878,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Uses the recipient's current locale resolved at send time (English), rejects the admin's language, and treats a snapshot only as a deliberate exception."
+      },
+      "R2": {
+        "score": 1,
+        "reason": "The payload is IDs only (notification_id, user_id, event_type, entity_id), and rendering happens at send time. It has no template key plus version; the template is only implied by event_type and the locale bundle."
+      },
+      "R3": {
+        "score": 1,
+        "reason": "Opt-out and validity are re-checked at send time and the payload holds IDs only. It never says the push body should avoid sensitive data, and it checks a single optedOut flag rather than per-channel notification preferences."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Uses a unique key (user, event, entity, channel), per-channel status, and retries that only send pending channels. Crash-between-send-and-mark duplicate risk is not discussed, but idempotency is clearly designed."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Specifies a test that enqueues as tr, switches to en, runs the job, and asserts English on both channels."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Using the admin's language",
+        "violated": false,
+        "evidence": "States that the admin's language is irrelevant and that the recipient's locale is used."
+      },
+      {
+        "item": "Rendering the text when queuing and sending it later",
+        "violated": false,
+        "evidence": "The payload is IDs only and rendering happens in the worker at send time."
+      },
+      {
+        "item": "Non-idempotent sending without acknowledging duplicate risk",
+        "violated": false,
+        "evidence": "The unique key and per-channel pending status make the handler idempotent."
+      }
+    ],
+    "summary": "A strong answer that sends in the recipient's send-time locale with an ID-only payload, idempotency and a locale-switch test. It is weaker on template key/version and on push sensitivity and per-channel preferences.",
+    "cost": 0.0354512
+  },
+  "answer": "The working directory has only a `.gitignore`, so there's no existing schema or queue to build on. Everything below is a proposed design with placeholder file names.\n\n## Which language?\n\n**English.** Resolve the recipient's language when the job runs, not when the event is queued.\n\n- The language belongs to the recipient. The admin's language is irrelevant, because the message is addressed to the user.\n- The user saved English before delivery, and that is the latest statement of their preference. Sending Turkish would ignore a choice they just made.\n- Nothing is lost by waiting. The email and push report an outcome, so they don't need to reflect state at enqueue time.\n\n**Do not snapshot the locale into the job payload.** Store only `user_id`, the event type, and the entity id. Look up `users.locale` in the job.\n\n**Exception:** if a message must be legally or contractually in the language in force at the time of the event, snapshot it deliberately. An approval notice doesn't need that.\n\n## Job design\n\n1. **Enqueue in the same transaction as the approval (transactional outbox).** The approval and the notification row commit together. A crash can't approve without notifying, or notify without approving.\n2. **Payload is IDs only.** For example `{notification_id}`. The worker loads the user, locale, email, device tokens and application at send time.\n3. **Resolve locale at send time.** Use `user.locale`, then fall back to the `Accept-Language` stored at signup, then the app default. Validate it against the supported list.\n4. **Render at send time from templates keyed by locale.** Keep the subject, body and push title/body in one `{locale}/{template}` bundle, so email and push can't diverge. Use ICU/plural-safe formatting. Dates and names should be formatted for the resolved locale.\n5. **Compute the locale once per job and pass it to both channels.** Otherwise a change landing between the two sends could produce a Turkish email and an English push.\n6. **Make it idempotent.** Use a unique key `(user_id, event_type, entity_id, channel)` and a per-channel `status`. A retry only sends channels still `pending`. Record the `locale` actually used for audit.\n7. **Re-check validity at send time.** If the application is no longer approved (revoked in the meantime), or the user is deleted or has opted out, skip the send.\n8. **Handle a locale change after sending starts.** Don't try to recall a sent message. The rule is that the locale is fixed at the moment the job renders.\n\n## Files I'd add or change\n\n- `migrations/XXXX_notifications.sql`\n- `src/users/locale.ts`: `resolveLocale(user)` with fallback and validation.\n- `src/notifications/outbox.ts`: transactional enqueue.\n- `src/notifications/worker.ts`: the job.\n- `src/notifications/templates/{en,tr}/application_approved.ts`: email and push strings.\n- `src/applications/approve.ts`: change the approval handler to call the outbox in its transaction.\n- `tests/notifications/locale-switch.test.ts`: enqueue as `tr`, switch to `en`, run the job, and assert English on both channels.\n\n## Key SQL\n\n```sql\nALTER TABLE users ADD COLUMN locale text NOT NULL DEFAULT 'en'\n  CHECK (locale IN ('en','tr'));\n\nCREATE TABLE notification_outbox (\n  id            bigserial PRIMARY KEY,\n  user_id       bigint NOT NULL REFERENCES users(id),\n  event_type    text   NOT NULL,           -- 'application_approved'\n  entity_id     bigint NOT NULL,\n  channel       text   NOT NULL CHECK (channel IN ('email','push')),\n  status        text   NOT NULL DEFAULT 'pending'\n                CHECK (status IN ('pending','sent','skipped','failed')),\n  locale_used   text,                      -- filled at send time, audit only\n  attempts      int    NOT NULL DEFAULT 0,\n  run_after     timestamptz NOT NULL DEFAULT now(),\n  created_at    timestamptz NOT NULL DEFAULT now(),\n  UNIQUE (user_id, event_type, entity_id, channel)\n);\nCREATE INDEX ON notification_outbox (run_after) WHERE status = 'pending';\n```\n\nEnqueue inside the approval transaction:\n\n```sql\nBEGIN;\nUPDATE applications SET status='approved', approved_by=$admin WHERE id=$app;\nINSERT INTO notification_outbox (user_id, event_type, entity_id, channel)\nSELECT user_id, 'application_approved', id, c\nFROM applications, unnest(ARRAY['email','push']) c\nWHERE id=$app\nON CONFLICT DO NOTHING;\nCOMMIT;\n```\n\nWorker claim:\n\n```sql\nSELECT * FROM notification_outbox\nWHERE status='pending' AND run_after <= now()\nORDER BY id\nFOR UPDATE SKIP LOCKED\nLIMIT 20;\n```\n\n## Worker sketch\n\n```ts\nasync function run(job: Outbox) {\n  const [user, app] = await load(job.user_id, job.entity_id);\n  if (!user || app.status !== 'approved' || user.optedOut) {\n    return mark(job, 'skipped');\n  }\n  const locale = resolveLocale(user);       // read now, not at enqueue time\n  const msg = render('application_approved', locale, { name: user.name, app });\n  try {\n    job.channel === 'email'\n      ? await sendEmail(user.email, msg.email)\n      : await sendPush(user.deviceTokens, msg.push);\n    await mark(job, 'sent', { locale_used: locale });\n  } catch (e) {\n    await retryWithBackoff(job, e);         // attempts++, run_after = now() + backoff\n  }\n}\n```\n\n**Consistency of the two channels.** Per-channel rows with the locale read at execution time are simple, but they allow the rare mismatch in point 5. If you want strict consistency, use one row per `(user, event)` and send both channels in a single job with one `locale`. I'd pick that for this feature. In that case, drop `channel` from the unique key and track per-channel status in two columns."
+}

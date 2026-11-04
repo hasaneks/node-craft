@@ -1,0 +1,77 @@
+{
+  "id": "E03",
+  "title": "Existing backend keeps its decisions",
+  "arm": "baseline",
+  "rep": 1,
+  "status": "graded",
+  "score": 13,
+  "max": 14,
+  "percent": 93,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft",
+    "node-craft-contract",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [],
+  "turns": 16,
+  "seconds": 48,
+  "cost": 0.1691,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Stays on NestJS/Express, Prisma, existing e2e test runner and style. No framework, ORM, adapter or package manager change. Keyset pagination is mentioned only as a follow-up."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Copies the customers module pattern: FirebaseAuthGuard, @CurrentUser, the existing module registration, the same DTO and response envelope."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "The query filters on ownerId and companyId from the guard's user, with no userId parameter. The e2e test checks that another user in the same company and a user in another company are excluded."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "limit is capped at 100 and offset at 10000. Order is issuedAt desc, id desc, so the tie-breaker is unique. It supports this with an index and notes the offset drift tradeoff."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Keeps the existing global filter and ValidationPipe shape, and tests for the 401 and 400 error shape."
+      },
+      "R6": {
+        "score": 1,
+        "reason": "Lists the e2e tests it would write and flags the seed and ValidationPipe gaps. It does not state tests-first ordering or the exact command it would run."
+      },
+      "R7": {
+        "score": 2,
+        "reason": "Keyset pagination and a shared PaginationQuery are framed as follow-ups. Nothing outside the change is bundled in."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Switching to Fastify or the Fastify adapter, Drizzle, Yarn or Vitest as part of the change",
+        "violated": false,
+        "evidence": "Uses Express, Prisma and the existing e2e setup. None of these are switched."
+      },
+      {
+        "item": "Adding a second lockfile or a second ORM",
+        "violated": false,
+        "evidence": "No lockfile or ORM is added. Only a Prisma index and migration."
+      },
+      {
+        "item": "Changing the existing error response format clients rely on",
+        "violated": false,
+        "evidence": "States it adds nothing to the error handling and keeps the { statusCode, error, message } shape."
+      },
+      {
+        "item": "Taking the user id from the query string or body",
+        "violated": false,
+        "evidence": "The user comes from the guard's @CurrentUser(). The DTO has only limit and offset."
+      }
+    ],
+    "summary": "A strong answer that follows the existing patterns, filters by owner and company, uses bounded stable pagination and keeps the error format. Its one weakness is that it doesn't state tests-first ordering or the command it would run.",
+    "cost": 0.0398712
+  },
+  "answer": "I read the project: a NestJS service on Express with Prisma and Postgres, and `README.md` marks it as a fixture. I changed and ran nothing.\n\n## What I found\n\n- **`src/customers/` is the pattern to copy.** It has a controller behind `@UseGuards(FirebaseAuthGuard)`, with `@CurrentUser()` supplying `{ id, companyId }`. It scopes rows with `where: { ownerId: user.id, companyId: user.companyId }`. It paginates with `limit` and `offset` (default 20, max 100 and 10000) and returns `{ items, limit, offset }`.\n- **`InvoicesModule` has no HTTP surface yet.** It only provides `PrismaService`, and the comment there says the billing job creates invoices today.\n- **`Invoice` has no index that serves this query.** Its only index is `@@unique([companyId, number])`. A list by owner, ordered by `issuedAt`, would sort in memory as the table grows.\n- **`test/customers.e2e-spec.ts` imports `./support/seed`, which is not in the repo.** I can't see `seedTwoCompanies` or `tokenFor`, so I'd have to extend or recreate that helper.\n- **Error shape:** the global filter and `ValidationPipe` already return `{ statusCode, error, message }`, so I add nothing there.\n\n## Decisions\n\n1. **Endpoint:** `GET /api/v1/invoices`, mirroring `GET /customers`. The guard and global prefix come from the existing setup.\n2. **Authorization:** filter on both `ownerId` and `companyId`, taken only from the guard's `req.user`. There is no `userId` parameter, so a caller can't ask for someone else's invoices. This follows the customers rule that \"my\" means owner and company.\n3. **Ordering:** `issuedAt desc, id desc`. `issuedAt` is the business meaning of \"newest\". `id` breaks ties so pages are deterministic, as customers does with `createdAt` and `id`.\n4. **Pagination style:** `limit`/`offset` with the same bounds and response envelope as customers. Web and mobile clients already parse that shape. The cost is that an invoice inserted by the billing job between page requests shifts rows, so a client can see a duplicate or miss one. If that matters, the follow-up is keyset pagination on `(issuedAt, id)` with an opaque cursor. The index below supports that unchanged. I would not mix the two styles in one API without a decision from you.\n5. **Response fields:** `id, number, customerId, totalMinor, currency, issuedAt`. I leave out `ownerId` and `companyId` (internal) and keep money as integer minor units, as stored.\n6. **DTO:** a separate `ListInvoicesQuery` that duplicates the customers one. This avoids editing the live customers code for a refactor nobody asked for. Extracting a shared `PaginationQuery` is a reasonable follow-up once there are three users.\n7. **Index:** a new one that matches the filter and sort.\n\n## Files\n\n**Changed**\n- `prisma/schema.prisma`: add an index to `Invoice`.\n- `src/invoices/invoices.module.ts`: register the controller and service.\n\n**Added**\n- `prisma/migrations/<timestamp>_invoices_owner_issued_idx/migration.sql`\n- `src/invoices/invoices.controller.ts`\n- `src/invoices/invoices.service.ts`\n- `src/invoices/dto/list-invoices.query.ts`\n- `test/invoices.e2e-spec.ts`, plus invoice seeding in `test/support/seed`\n\n## Key code\n\n`prisma/schema.prisma`, inside `model Invoice`:\n```prisma\n  @@index([ownerId, companyId, issuedAt(sort: Desc), id(sort: Desc)])\n```\n\nMigration SQL. `CREATE INDEX CONCURRENTLY` can't run inside a transaction, so keep this as the only statement in its migration file. I'd apply it to production in a low-traffic window, as the table may be large:\n```sql\nCREATE INDEX CONCURRENTLY \"invoices_owner_id_company_id_issued_at_id_idx\"\n  ON \"invoices\" (\"owner_id\", \"company_id\", \"issued_at\" DESC, \"id\" DESC);\n```\n\n`src/invoices/dto/list-invoices.query.ts`:\n```ts\nimport { Type } from 'class-transformer';\nimport { IsInt, IsOptional, Max, Min } from 'class-validator';\n\nexport class ListInvoicesQuery {\n  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100)\n  limit = 20;\n\n  @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(10000)\n  offset = 0;\n}\n```\n\n`src/invoices/invoices.service.ts`:\n```ts\n@Injectable()\nexport class InvoicesService {\n  constructor(private readonly prisma: PrismaService) {}\n\n  async list(user: CurrentUser, query: ListInvoicesQuery) {\n    const rows = await this.prisma.invoice.findMany({\n      where: { ownerId: user.id, companyId: user.companyId },\n      orderBy: [{ issuedAt: 'desc' }, { id: 'desc' }],\n      take: query.limit,\n      skip: query.offset,\n      select: { id: true, number: true, customerId: true, totalMinor: true, currency: true, issuedAt: true },\n    });\n    return { items: rows, limit: query.limit, offset: query.offset };\n  }\n}\n```\n\n`src/invoices/invoices.controller.ts`:\n```ts\n@Controller('invoices')\n@UseGuards(FirebaseAuthGuard)\nexport class InvoicesController {\n  constructor(private readonly invoices: InvoicesService) {}\n\n  @Get()\n  list(@CurrentUser() user: User, @Query() query: ListInvoicesQuery) {\n    return this.invoices.list(user, query);\n  }\n}\n```\nThe imports are the same as in `customers.controller.ts`.\n\n`src/invoices/invoices.module.ts`:\n```ts\n@Module({\n  controllers: [InvoicesController],\n  providers: [InvoicesService, PrismaService],\n})\nexport class InvoicesModule {}\n```\nI'd also update the stale \"no HTTP surface yet\" comment.\n\n## Tests (`test/invoices.e2e-spec.ts`)\n\nI'd follow the customers e2e test, using two companies and users from the seed:\n- Alice sees only her own invoices. Another user in the same company and a user in the other company are excluded.\n- Results come back newest first, with equal `issuedAt` values ordered by `id`.\n- `limit=2&offset=2` returns the correct slice, and the pages don't overlap.\n- No `Authorization` header returns 401 in the `{ statusCode, error, message }` shape.\n- `limit=0`, `limit=101` and `offset=-1` return 400.\n- Unknown query keys return 400, because `forbidNonWhitelisted` is on.\n\nOne gap: the existing e2e test builds the app with only `setGlobalPrefix`, so it skips the `ValidationPipe` and `HttpErrorFilter` set up in `main.ts`. The 400 and error-shape tests would fail unless the new test also applies those two, or the pipe and filter are moved into a shared setup function.\n\n## Open questions for you\n\n- Does the web or mobile client need a total count? If so, add a second `count` query and a `total` field to the response. I left it out because customers doesn't have it.\n- Should `GET /invoices` accept a `customerId` filter? I left it out of scope."
+}

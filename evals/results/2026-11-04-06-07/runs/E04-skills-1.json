@@ -1,0 +1,68 @@
+{
+  "id": "E04",
+  "title": "Next.js client integration without mobile dependencies",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 12,
+  "max": 12,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-contract"
+  ],
+  "loadedSkills": [
+    "node-craft-contract"
+  ],
+  "turns": 10,
+  "seconds": 50,
+  "cost": 0.1934,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "OpenAPI is generated from route schemas, committed and CI-checked; the web generates types with openapi-typescript and openapi-fetch, and Zod parses at the boundary only where data is critical or external."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The envelope has code, localized message, details with field and code, and requestId (also sent as the X-Request-Id header). Clients branch on code and field, never on message."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "The resolution order is X-App-Locale, then preferredLocale, then Accept-Language, then en. The header never writes to the profile and only PATCH /me does. Content-Language and Vary are covered."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Cursor pagination returns data plus meta.nextCursor, hasMore and limit. Default is 20 and max 100, an opaque signed cursor, INVALID_CURSOR, and a tie-breaker are specified."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "It chooses an HttpOnly session cookie with a CSRF token on mutating methods, SameSite and the same-site requirement, and a CORS allowlist with credentials."
+      },
+      "R6": {
+        "score": 2,
+        "reason": "It forbids importing ORM models and backend DTO classes into the web app, and requires generating types from the spec. No mobile libraries are required. It mentions a future native client only for bearer tokens, which is not a requirement."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Requiring React Native, RTK Query, rn-craft or any mobile-specific library",
+        "violated": false,
+        "evidence": "The web client uses openapi-fetch and useInfiniteQuery, which are web-side tools, and no mobile library appears."
+      },
+      {
+        "item": "Sharing ORM models or backend DTO classes with the web app",
+        "violated": false,
+        "evidence": "It states the web team generates types from the spec and must never import ORM models or backend DTO classes."
+      },
+      {
+        "item": "Clients comparing translated messages for logic",
+        "violated": false,
+        "evidence": "It states clients branch on code and details[].field, never on message."
+      }
+    ],
+    "summary": "The answer meets every rubric point and violates no forbidden decision.",
+    "cost": 0.0454132
+  },
+  "answer": "The working directory holds only the node-craft skills (`.claude/skills/...`) and no Fastify code. So this is the default contract from `node-craft-contract`, not an extension of an existing one. If a contract already exists in another repo, it wins and these rules become additions to it.\n\n## 1. Base rules\n\n- REST under `/api/v1`, camelCase JSON, plural kebab-case paths.\n- **Success:** `{ \"data\": ..., \"meta\"?: ... }`. A 204 has no body.\n- **Errors:** an HTTP status that matches the failure, never `200` with `success: false`.\n- **Machine values** never change with language. That covers error codes, field paths and enum values.\n- Clients may get unknown enum values and must handle them.\n- Precision:\n  - money is `{ \"amount\": \"12.50\", \"currency\": \"TRY\" }`;\n  - ids beyond 2^53 are strings;\n  - instants are ISO 8601 with offset;\n  - calendar dates are `YYYY-MM-DD`.\n- Request bodies reject unknown fields with `additionalProperties: false`.\n\n## 2. Authentication\n\n**Decision: the browser never holds a bearer token in JS-readable storage.** The web uses an HttpOnly session cookie plus CSRF. Bearer tokens are for server-to-server and any future native client. The reason is that XSS cannot steal an HttpOnly cookie, and server components can forward it.\n\n| Caller | Credential |\n|---|---|\n| Next.js server components and route handlers | Forward the incoming `Cookie` header to the API (or a Bearer token if the identity provider issues one server-side) |\n| Next.js client components | Call the API with `credentials: 'include'` and an `X-CSRF-Token` header on POST, PUT, PATCH and DELETE |\n| Admin panel | Same mechanism, but a separate cookie name, a separate audience and `/api/v1/admin/*` routes with role checks on the server |\n\n- **Same site is required.** Put the web app on `app.example.com` and the API on `api.example.com`, with the cookie on `Domain=.example.com; Secure; HttpOnly; SameSite=Lax`. A cross-site API would need `SameSite=None` and is weaker.\n- **Cookie setup.** The login endpoint is `POST /api/v1/auth/session`. It verifies the identity provider's ID token and sets the cookie. If you use Firebase, that means Firebase session cookies. Please confirm the provider, because I assumed it.\n- **CSRF.** `GET /api/v1/auth/csrf` returns a token and the API checks it on all state-changing methods.\n- **CORS.** Use an explicit allowlist of origins, never `*` together with credentials. Allow the headers `Content-Type`, `X-App-Locale`, `X-CSRF-Token`, `Idempotency-Key` and `X-Request-Id`. Expose `X-Request-Id`, `Retry-After` and `Content-Language`.\n- **Roles and permissions** are decided on the server from the verified identity. Locale and client-sent flags never grant anything.\n- **Outcomes the client must handle:**\n\n| Status and code | Client does |\n|---|---|\n| 401 `AUTH_REQUIRED` or `AUTH_INVALID` | Server components redirect to login. Client components refresh the session once, retry once, then sign out |\n| 401 `AUTH_REVOKED` or `ACCOUNT_DELETED` | Sign out and clear caches |\n| 403 `FORBIDDEN` or `ACCOUNT_BLOCKED` | Show a no-access state and do not retry |\n| 404 `RESOURCE_NOT_FOUND` | Also returned for another user's resource, so existence is not leaked |\n\n- **Identity.** `GET /me` returns the backend `id`, `preferredLocale`, `timeZone`, status, roles and entitlements. The web uses that `id`, not the provider uid.\n\n## 3. Errors\n\n```json\n{\n  \"error\": {\n    \"code\": \"VALIDATION_ERROR\",\n    \"message\": \"Lütfen işaretli alanları kontrol edin.\",\n    \"details\": [{ \"field\": \"items.0.quantity\", \"code\": \"MIN_VALUE\", \"message\": \"…\" }]\n  },\n  \"locale\": \"tr\",\n  \"requestId\": \"…\"\n}\n```\n\n- Clients branch on `code` and `details[].field`, never on `message`. `message` is safe to display.\n- `requestId` is also sent in the `X-Request-Id` response header. The UI should show it on error pages so support can find the logs.\n- Status mapping:\n\n| Status | Meaning | Codes |\n|---|---|---|\n| 400 | Invalid input | `VALIDATION_ERROR`, `INVALID_CURSOR` |\n| 401 | No or bad identity | `AUTH_REQUIRED`, `AUTH_INVALID`, `AUTH_REVOKED` |\n| 403 | Not allowed | `FORBIDDEN`, `ACCOUNT_BLOCKED` |\n| 404 | Not found or hidden | `RESOURCE_NOT_FOUND` |\n| 409 | State conflict. Retrying the same request will fail again | `CONFLICT`, `IDEMPOTENCY_KEY_REUSED` |\n| 429 | Slow down, with `Retry-After` | `RATE_LIMITED` |\n| 500 | Unexpected | `INTERNAL_ERROR` |\n| 503 | Temporary, with `Retry-After` when known | `SERVICE_UNAVAILABLE`, `MAINTENANCE` |\n\n- The API never returns SQL, stack traces or provider text.\n- Critical creating writes (orders, payments and similar) accept `Idempotency-Key`. The client generates one per user action and reuses it on retry. Do not retry writes on 5xx without it.\n- In Next.js, `404` and `403` from a server component map to `notFound()` and a forbidden page. Anything else is thrown to `error.tsx` with the `requestId`.\n\n## 4. Language\n\n- **Resolution order:** `X-App-Locale`, then the saved `preferredLocale`, then `Accept-Language`, then `en`. An unsupported value is skipped, not fatal.\n- The Next.js app sends `X-App-Locale` from its route locale (for example the `[locale]` segment) on every call. Server components must pass it explicitly, because there is no browser `Accept-Language` on that hop.\n- The header never writes to the profile. Only `PATCH /me { preferredLocale }` does.\n- Responses carry `Content-Language` and `Vary: Accept-Language, X-App-Locale`. Signed-in responses are `Cache-Control: private` or `no-store`.\n- The backend localizes only what it produces: errors, emails and push. The web localizes its own UI from its own catalogs. They share codes, field paths and enums.\n- **Next.js caching trap:** the data cache keys on URL, not headers. For authenticated or localized fetches use `cache: 'no-store'`, or add `locale` to the cache tag or key.\n\n## 5. Pagination\n\n- Lists use cursors, default `limit` 20 and max 100. A larger `limit` returns 400, and we pick reject over clamp.\n- The sort has a unique tie-breaker, and sort and filter fields come from an allowlist.\n- The response is:\n\n```json\n{ \"data\": [], \"meta\": { \"nextCursor\": \"…\", \"hasMore\": true, \"limit\": 20 } }\n```\n\n- The last page has `nextCursor: null`. An empty list is a 200 with `data: []`.\n- The cursor is opaque (base64url of a small JSON, HMAC-signed). A bad cursor returns 400 `INVALID_CURSOR`. Changing sort or filters means starting again with no cursor.\n- Server components read `?cursor=` from `searchParams`, so pages are linkable. Client components use `useInfiniteQuery` with `getNextPageParam: (p) => p.meta.nextCursor ?? undefined`.\n- **Admin tables** may use offset pagination (`page`, `pageSize` up to 100) with a capped maximum offset, only for small bounded lists. Exact `total` is opt-in via a separate endpoint or an estimate, not on every request.\n\n```sql\nSELECT id, created_at, total FROM orders\nWHERE tenant_id = $1 AND (created_at, id) < ($2, $3)\nORDER BY created_at DESC, id DESC\nLIMIT $4 + 1;  -- the extra row tells us hasMore\n-- index: (tenant_id, created_at DESC, id DESC)\n```\n\n## 6. Types\n\n- **One schema source, code-first.** Use TypeBox with `@fastify/type-provider-typebox`. `@fastify/swagger` generates OpenAPI from the same route schemas, so validation, serialization and docs cannot drift. The spec includes the error schema on every route, the locale headers, `Idempotency-Key`, `Retry-After`, the security schemes and the pagination `meta`.\n- **Commit `openapi.json`.** CI regenerates it and fails if it differs from the committed file.\n- **The web team generates types from the spec, never from backend code.** Use `openapi-typescript` for types and `openapi-fetch` for a typed client. They must never import ORM models, backend DTO classes or any package that pulls Node-only or secret dependencies.\n- Generated types do not validate at runtime. Parse at the boundary with Zod only where data is critical or external.\n- **Distribution:**\n  - in a monorepo, `apps/web` runs `openapi-typescript ../api/openapi.json -o src/api/schema.d.ts` in its build;\n  - in separate repos, publish `openapi.json` as a release asset with each API version and pin it in the web repo.\n\n## 7. Files to add or change\n\nAPI:\n- `src/shared/http/error-handler.ts` (`setErrorHandler` plus validation mapping to `VALIDATION_ERROR`)\n- `src/shared/http/errors.ts` (`AppError`, the code registry and `STATUS` map)\n- `src/shared/http/locale.ts` (an `onRequest` hook, so validation errors are already localized)\n- `src/shared/http/pagination.ts` (cursor encode, sign and verify)\n- `src/shared/auth/session.ts` (cookie, CSRF, role guard)\n- `src/shared/i18n/{en,tr}.json` (a message for every code, with a CI check)\n- `src/app.ts` (CORS, swagger, hooks)\n- `openapi.json` (committed) and `scripts/gen-openapi.ts`\n- `tests/contract/*.test.ts` using `inject`: 401, 403 or 404 for another user's resource, 400 with details, 409, 429, a Turkish error with codes unchanged, and a leak test for 500\n\nWeb:\n- `src/api/client.ts` (the one HTTP layer)\n- `src/api/errors.ts` (the typed `ApiError`)\n- `src/api/schema.d.ts` (generated)\n\nError handler core:\n\n```ts\napp.setErrorHandler((err, req, reply) => {\n  const { status, headers, body } = toErrorResponse(err, { t, locale: req.locale, requestId: req.id });\n  req.log.error({ err, requestId: req.id }, 'request failed');   // full detail stays in logs\n  reply.headers(headers).status(status).send(body);\n});\n```\n\nWeb client core:\n\n```ts\nconst client = createClient<paths>({ baseUrl: API_URL, credentials: 'include' });\nclient.use({\n  onRequest: ({ request }) => {\n    request.headers.set('X-App-Locale', currentLocale());\n    if (isMutation(request.method)) request.headers.set('X-CSRF-Token', csrf());\n    return request;\n  },\n  onResponse: async ({ response }) => {\n    if (!response.ok) throw await parseApiError(response);   // status, code, fields, requestId, retryAfter\n  },\n});\n// Server components: pass { headers: { cookie, 'X-App-Locale': locale }, cache: 'no-store' }.\n```\n\n## 8. Versioning\n\n- Additive changes are free: new optional fields, new endpoints, new enum values.\n- Breaking changes need `/api/v2`. Never repurpose a field, a code or an enum value.\n- The web app deploys with the API, but the admin panel and cached tabs may lag, so keep to the additive rule anyway.\n\n## 9. Open questions\n\n- Which identity provider issues sessions? Firebase is assumed above.\n- Are the web and the API on the same registrable domain? Section 2 depends on it.\n- Is the admin panel a separate deployment, and does it need a separate user pool?"
+}

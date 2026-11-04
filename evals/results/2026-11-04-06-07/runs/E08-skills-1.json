@@ -1,0 +1,61 @@
+{
+  "id": "E08",
+  "title": "Accessing another tenant's resource",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 8,
+  "max": 8,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch",
+    "node-craft-contract"
+  ],
+  "loadedSkills": [
+    "node-craft-arch"
+  ],
+  "turns": 10,
+  "seconds": 60,
+  "cost": 0.1925,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Tenant comes only from the verified token via the user's membership row, never from body, query or header. The answer adds a brand-typed TenantScope and a CI check against reading x-tenant-id."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The write and read queries include tenant_id in the WHERE clause, backed by RLS. The answer returns 404 identical to a non-existent id, with only the tenant-scoped follow-up allowed to tell a wrong version from a missing row. 403 is kept for same-tenant role failures. A body tenantId is rejected with 400 before any lookup."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Tenant appears in cache keys, job payloads, file object keys and logs. Unique constraints and composite FKs are tenant-aware (tenant_id, id) and (tenant_id, job_type, business_key). The answer also covers per-tenant schedulers and cleanup."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "The answer lists a cross-tenant matrix test for reads and writes, RLS tests, and cache, job and file tests. It also names an architecture test and a regression-test-first rule."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Trusting `tenantId` from the request body.",
+        "violated": false,
+        "evidence": "The tenant comes only from the token, and a body tenantId is rejected with 400 UNKNOWN_FIELD."
+      },
+      {
+        "item": "Loading the document first and returning tenant B's data in an error.",
+        "violated": false,
+        "evidence": "The answer never runs an unscoped existence check. Every lookup is tenant-scoped, and the response is an identical 404 with no data."
+      },
+      {
+        "item": "Only hiding the document in the UI.",
+        "violated": false,
+        "evidence": "Enforcement is server-side, in query scoping, RLS, FKs and tests."
+      }
+    ],
+    "summary": "The answer fully covers the reference points: token-derived tenant, scoped queries with a non-leaking 404, tenant carried through cache, jobs, files and constraints, and cross-tenant tests, and it violates none of the forbidden decisions.",
+    "cost": 0.042105199999999995
+  },
+  "answer": "The working directory holds only the node-craft skill files and no application code. The file paths below are therefore proposals for a feature-module layout. The rules come from `node-craft-arch` (`auth.md`, `redis.md`, `queues-workers.md`, `media.md`, `postgres-model.md`) and `node-craft-contract` (`errors.md`).\n\n## What must happen\n\n**GET `/api/v1/documents/{id}` with B's id**\n- Respond `404 RESOURCE_NOT_FOUND`.\n- The body, headers and code path must be identical to a random non-existent uuid. Only `requestId` differs.\n- Do not respond 403. A 403 confirms the id exists.\n- Use 404 for every tenant-owned resource type.\n- Use 403 only when the document is in the caller's own tenant and the caller's role forbids the action.\n\n**PATCH with `\"tenantId\": \"A\"` in the body**\n- `tenantId` is data, never authority. The tenant comes only from the verified token, via the backend user's membership row, never from a body, query or header.\n- The schema has `additionalProperties: false` and no `tenantId` field. The request fails with `400 VALIDATION_ERROR`, `details: [{field: \"tenantId\", code: \"UNKNOWN_FIELD\"}]`.\n- This check runs before any lookup, for every id, so the 400 reveals nothing about existence.\n- The same applies when the value is the caller's own tenant, `\"A\"`. A document never changes tenant through PATCH.\n- If a client ever sends a valid body to B's id, the answer is 404 and no row changes.\n- The write itself carries the tenant condition, and `tenant_id` is never in the `SET` list:\n\n```sql\nUPDATE documents\n   SET title = $3, body = $4, version = version + 1, updated_at = now()\n WHERE id = $1 AND tenant_id = $2 AND version = $5   -- $2 from the token context\nRETURNING *;\n-- 0 rows -> RESOURCE_NOT_FOUND (or 409 CONFLICT if the row exists in this tenant with a different version)\n```\n\nOnly the tenant-scoped follow-up query may tell \"wrong version\" from \"missing\". Never run an unscoped existence check.\n\n## How to make it hold everywhere\n\n### 1. Tenant context, one source\n- Add `src/modules/auth/tenant-context.ts`. The auth hook verifies the token, loads `users` and `memberships`, and sets `req.ctx = { userId, tenantId, role }`.\n- Users belong to one company, so `users.tenant_id NOT NULL` is enough.\n\n### 2. Repositories cannot be called without a tenant\n- In `src/modules/documents/documents.repo.ts`, every method takes `scope: TenantScope` as its first argument. `TenantScope` is a branded type created only by the auth hook.\n- No `findById(id)` exists. Forgetting the tenant becomes a compile error.\n- Routes and workers call use cases (`GetDocument`, `UpdateDocument`). The use case owns the transaction.\n\n### 3. The database as the backstop\nAdd the migration `migrations/NNNN_documents_tenant_rls.sql`. It is expand-only and needs a backfill check that `tenant_id` has no NULLs.\n\n```sql\nALTER TABLE documents ALTER COLUMN tenant_id SET NOT NULL;\nALTER TABLE documents ADD CONSTRAINT documents_tenant_id_id_uk UNIQUE (tenant_id, id);\n\n-- children must match the parent's tenant\nALTER TABLE document_files\n  ADD CONSTRAINT document_files_doc_fk\n  FOREIGN KEY (tenant_id, document_id) REFERENCES documents (tenant_id, id);\n\n-- tenant_id is immutable\nCREATE FUNCTION forbid_tenant_change() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id THEN\n    RAISE EXCEPTION 'tenant_id is immutable';\n  END IF;\n  RETURN NEW;\nEND $$;\nCREATE TRIGGER documents_tenant_immutable BEFORE UPDATE ON documents\n  FOR EACH ROW EXECUTE FUNCTION forbid_tenant_change();\n\n-- row-level security\nALTER TABLE documents ENABLE ROW LEVEL SECURITY;\nALTER TABLE documents FORCE ROW LEVEL SECURITY;\nCREATE POLICY tenant_isolation ON documents\n  USING      (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid)\n  WITH CHECK (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid);\n```\n\n- The app connects as a role that does not own the tables and has no `BYPASSRLS`. Migrations run as a different role.\n- Inside each transaction the use case runs `SELECT set_config('app.tenant_id', $1, true)`. The `true` makes it transaction-local, so it cannot leak across pooled connections.\n- If the setting is missing, the policy matches no rows. Forgetting the tenant therefore returns nothing instead of leaking data.\n- The `WHERE tenant_id = $2` in the query stays. RLS is the second line of defence, not a replacement.\n- Repeat the same pattern for every tenant-owned table.\n\n### 4. Cache\n- Add `src/shared/cache/tenant-cache.ts`. Its API is `get(scope, kind, id)`, and it is the only place keys are built.\n- The key is `prod:v1:tenant:{tenantId}:doc:{id}`.\n- A's request for B's id looks up `tenant:A:doc:B-id`, which is a miss. The database then returns nothing and the answer is 404.\n- Never key by the document id alone. Never cache a \"not found\" under a shared key.\n- PATCH invalidates `tenant:{t}:doc:{id}` after commit.\n- The existing guidance applies: Redis down means fail open to the database, and PostgreSQL stays the source of truth.\n- Also add tenant to list and search keys, and to any per-user keys.\n\n### 5. Jobs (BullMQ)\n- The payload is `{ v: 1, tenantId, documentId }`. The use case sets `tenantId` from its own context, never from request input.\n- Add `src/modules/documents/jobs/*.handler.ts`. The handler calls the same tenant-scoped repository with `(tenantId, documentId)` and sets the RLS context. A document missing for that tenant throws `UnrecoverableError`.\n- Handlers are idempotent in PostgreSQL, for example `UNIQUE (tenant_id, job_type, business_key)`, not by `jobId` alone.\n- Schedulers and cleanup jobs iterate tenants explicitly, one tenant context per unit of work. There is no global \"all documents\" query that skips the scope.\n- Logs and job payloads carry `tenantId` and ids only, no document content.\n\n### 6. Files\n- Object keys are server-generated: `tenant/{tenantId}/doc/{documentId}/{uuid}`. The client never supplies a key or path.\n- A `files` row holds `tenant_id`, `document_id` and the key. Download first loads the row with the tenant scope, so B's file id gives 404. Then it returns a short-lived presigned GET, or streams the file.\n- Upload is `POST /uploads` followed by `/complete`, both scoped, with the key built from the context tenant.\n- Presigned URLs are short-lived, and no private file gets a permanent public URL.\n- Use a bucket policy or IAM prefix per tenant where the platform allows it.\n- Cleanup of pending or orphaned objects runs per tenant.\n\n### 7. Detection\n- Log denied cross-tenant lookups server-side only, as a security event with `requestId`, `userId` and `tenantId`. Never include the target's tenant in the response.\n- Alert on repeated 404s from one user against many ids, and rate-limit that user.\n- Write audit records on the same path.\n\n### 8. Tests that keep it true\nThese need a real PostgreSQL (Testcontainers or Compose), not mocks.\n\n- `tests/tenancy/cross-tenant.matrix.test.ts`:\n  - Seed tenants A and B.\n  - For every route that takes a resource id, call it as A with B's id.\n  - Assert 404 with a body equal to the response for a random uuid, no change in B's rows, and 400 for any body containing `tenantId`.\n  - This table is generated from the route list, so a new endpoint without an entry fails CI.\n- `tests/tenancy/rls.test.ts`:\n  - With no `app.tenant_id` set, `SELECT` returns 0 rows.\n  - With tenant A set, a B row is invisible.\n  - `UPDATE ... SET tenant_id` fails.\n  - A cross-tenant child insert is rejected by the composite FK.\n- A cache test: B's cached document is never served to A.\n- A job test: a payload with the wrong tenant fails permanently with no side effect.\n- A file test: B's file id returns 404, and keys always start with the caller's tenant prefix.\n- An architecture test (lint rule or grep in CI): no SQL or ORM access to tenant tables outside `*.repo.ts`, and no `req.body.tenantId`, `x-tenant-id` or similar read anywhere.\n- Write the regression test first and watch it fail on the unscoped implementation.\n\n## Decisions summary\n\n| Decision | Reason |\n|---|---|\n| 404, not 403, for other tenants' documents | A 403 confirms the id exists. Unguessable ids are not authorization. |\n| Tenant from the token membership only | Body, query and headers are attacker-controlled. |\n| Reject `tenantId` in the body with 400 | It fails closed and the 400 is independent of the id, so nothing leaks. |\n| Tenant in the SQL `WHERE`, plus RLS, plus composite FKs | One missed query cannot leak data, because the database also enforces the rule. |\n| Tenant in every cache key, job payload and file path | Redis, queues and storage have no row-level checks of their own. |\n| A CI matrix test over every endpoint | The guarantee survives new features. |"
+}

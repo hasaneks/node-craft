@@ -1,0 +1,66 @@
+{
+  "id": "E04",
+  "title": "Next.js client integration without mobile dependencies",
+  "arm": "baseline",
+  "rep": 1,
+  "status": "graded",
+  "score": 11,
+  "max": 12,
+  "percent": 92,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-contract"
+  ],
+  "loadedSkills": [],
+  "turns": 3,
+  "seconds": 51,
+  "cost": 0.1141,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "OpenAPI (/v1/openapi.json, committed openapi/v1.json) is the single source. It generates types with openapi-typescript and openapi-fetch, and oasdiff runs in CI. Response serialization strips unknown fields. Runtime parsing on the client is not explicitly discussed, but server-side validation and the schema coverage are strong."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "RFC 9457 problem+json with a stable `code` enum, an `errors[]` array with pointers and codes, and `requestId` (also sent as a header). It states to branch on `code` and never on `detail`."
+      },
+      "R3": {
+        "score": 1,
+        "reason": "It gives a resolution order and sends Content-Language and Vary. But it uses a `?locale=` query parameter and Accept-Language instead of an X-App-Locale header. It does not say that the header leaves the user profile unchanged. Error messages are English-only, and the client localizes them from `code`."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Cursor pagination with a default limit of 20 and a max of 100. The response is `{data, page:{nextCursor, hasMore}}`, which differs slightly from `meta` but is equivalent. It also covers an invalid cursor and an opt-in total."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "It chooses an opaque HttpOnly session cookie. CSRF is handled with SameSite=Lax and an Origin check on non-GET requests. It also explains how server components, client components and the admin panel use the cookie."
+      },
+      "R6": {
+        "score": 2,
+        "reason": "No React Native, RTK Query or rn-craft. Types come only from the OpenAPI spec, with no ORM or entity sharing."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Requiring React Native, RTK Query, rn-craft or any mobile-specific library",
+        "violated": false,
+        "evidence": "It uses openapi-typescript and openapi-fetch for the web. Nothing mobile-specific is mentioned."
+      },
+      {
+        "item": "Sharing ORM models or backend DTO classes with the web app",
+        "violated": false,
+        "evidence": "The web team imports types generated from openapi/v1.json only."
+      },
+      {
+        "item": "Clients comparing translated messages for logic",
+        "violated": false,
+        "evidence": "'The web team branches on `code`, never on `detail`.'"
+      }
+    ],
+    "summary": "This is a strong, correct contract covering OpenAPI types, problem+json errors, cursor pagination and cookie auth with CSRF. It loses points on locale handling, because it uses a query parameter and Accept-Language instead of X-App-Locale and does not say the header leaves the profile unchanged.",
+    "cost": 0.041301199999999996
+  },
+  "answer": "The working directory has only a `.gitignore`, with no Fastify project in it. So this contract is a design, and every file path below is a proposal, not a change to existing code. Two assumptions to confirm: the locale list (I use `en` as the default) and whether the admin panel is a separate Next app.\n\n## 1. Authentication: opaque session cookie\n\n**Decision:** Fastify issues an opaque session ID in an `HttpOnly; Secure; SameSite=Lax` cookie. The database stores only a hash of the ID. There is no JWT in `localStorage`.\n\n**Reasons:**\n- The web app is browser-only, so cookies are the safest option because JavaScript can't read them.\n- Server components can't read `localStorage`. They can forward the cookie.\n- The admin panel will need \"log out everywhere\" and \"ban this user\". Opaque sessions can be revoked right away, and stateless JWTs can't.\n\n**How each caller uses it:**\n- **Server components:** `fetch(API + path, { headers: { cookie: (await cookies()).toString() } })`. Use `cache: 'no-store'` on authenticated calls.\n- **Client components:** call same-origin `/api/*`. Next `rewrites` proxy that path to Fastify, so there is no CORS and no `credentials: 'include'` to remember.\n- **Admin panel:** a separate cookie name (`admin_sid`) and a `role` check on every route. If it lives on another origin, add its origin to the `@fastify/cors` allowlist with `credentials: true`. Never use `*`.\n- **CSRF:** `SameSite=Lax` plus a check that `Origin` matches the allowlist on every non-GET request. Reject with `403 csrf_rejected`.\n\n```sql\n-- db/migrations/001_sessions.sql\ncreate table sessions (\n  id_hash     bytea primary key,           -- sha256(token)\n  user_id     uuid not null references users(id) on delete cascade,\n  audience    text not null check (audience in ('web','admin')),\n  created_at  timestamptz not null default now(),\n  expires_at  timestamptz not null,\n  revoked_at  timestamptz,\n  user_agent  text,\n  ip          inet\n);\ncreate index on sessions (user_id) where revoked_at is null;\n```\n\n```ts\n// src/plugins/auth.ts (sketch)\napp.decorateRequest('user', null);\napp.addHook('onRequest', async (req) => {\n  const token = req.cookies.sid;\n  if (!token) return;\n  const hash = createHash('sha256').update(token).digest();\n  req.user = await sessions.findActive(hash, 'web'); // checks expiry and revoked_at\n});\nexport const requireUser = async (req) => {\n  if (!req.user) throw new ApiError(401, 'unauthenticated');\n};\n```\n\nUse argon2 for passwords and `@fastify/rate-limit` on the login routes.\n\n## 2. Errors: RFC 9457 `application/problem+json`\n\nEvery non-2xx response has the same shape. The web team branches on `code`, never on `detail`.\n\n```json\n{\n  \"type\": \"https://api.example.com/errors/validation_failed\",\n  \"title\": \"Validation failed\",\n  \"status\": 422,\n  \"code\": \"validation_failed\",\n  \"detail\": \"2 fields are invalid\",\n  \"requestId\": \"01JC...\",\n  \"errors\": [{ \"pointer\": \"/email\", \"code\": \"invalid_format\" }]\n}\n```\n\n- `code` is a stable snake_case enum, documented in OpenAPI. The set includes `unauthenticated`, `forbidden`, `not_found`, `conflict`, `validation_failed`, `rate_limited` and `internal`.\n- `requestId` is also sent as an `x-request-id` header, so support can find the log line.\n- A 500 never leaks a stack trace or SQL.\n\n```ts\n// src/plugins/errors.ts\napp.setErrorHandler((err, req, reply) => {\n  const e = err instanceof ApiError ? err : fromFastify(err); // maps err.validation -> 422 + errors[]\n  if (e.status >= 500) req.log.error(err);\n  reply.status(e.status).type('application/problem+json').send({\n    type: `${ERR_BASE}/${e.code}`, title: e.title, status: e.status,\n    code: e.code, detail: e.detail, requestId: req.id, errors: e.errors,\n  });\n});\n```\n\n## 3. Language\n\n- **Errors:** `detail` is English and for developers only. The web app maps `code` to its own i18n strings, so Next owns all UI copy. The `errors[].pointer` lets forms attach messages to fields.\n- **Content:** the API picks the locale in this order: `?locale=` query parameter, then `Accept-Language`, then the default `en`. Next passes its route locale (`/tr/...`) explicitly, because explicit is cache-safe.\n- **Response headers:** `Content-Language: tr` and `Vary: Accept-Language`.\n- **Storage:** translated fields go in a `*_translations(entity_id, locale, ...)` table. If a translation is missing, fall back to the default and report which locale was used through `Content-Language`.\n- **Dates and money:** dates are ISO 8601 UTC, money is integer minor units plus a currency code, and IDs are strings. Formatting for display belongs to the client.\n\n## 4. Pagination: keyset cursors\n\n**Decision:** list endpoints use opaque cursors, with no `page=3`.\n\n- **Request:** `?limit=20&cursor=...`. The default limit is 20 and the maximum is 100.\n- **Response:** `{ \"data\": [...], \"page\": { \"nextCursor\": \"…\" | null, \"hasMore\": true } }`.\n- **Reasons:** offset pagination gets slow and skips or duplicates rows when data changes, and keyset avoids both. The cursor can change internally without breaking clients.\n- **Admin tables:** they need totals and page jumps. Allow `?withTotal=true`, which adds `page.total` and runs a separate `count(*)`. It is opt-in because counting is expensive.\n\n```sql\nselect * from posts\nwhere (created_at, id) < ($1, $2)      -- decoded cursor\norder by created_at desc, id desc\nlimit $3 + 1;                          -- the extra row tells us hasMore\n```\n\n```ts\n// src/lib/cursor.ts\nexport const encode = (c: { t: string; id: string }) => Buffer.from(JSON.stringify(c)).toString('base64url');\nexport const decode = (s: string) => { try { return JSON.parse(Buffer.from(s, 'base64url').toString()); }\n  catch { throw new ApiError(400, 'invalid_cursor'); } };\n```\n\n## 5. Types: OpenAPI is the single source of truth\n\n- Define routes with TypeBox schemas through `@fastify/type-provider-typebox`. Those schemas validate requests and also serialize responses, which strips fields that aren't in the schema.\n- Generate the spec with `@fastify/swagger`. Serve it at `/v1/openapi.json` and also write it to the repo with `scripts/export-openapi.ts`.\n- The web team runs `openapi-typescript` to generate `api.d.ts`, and uses `openapi-fetch` for typed calls. It works the same in server and client components.\n- In CI, run `oasdiff breaking` between the base branch spec and the PR spec. Breaking changes need a `/v2` or an explicit approval.\n- Version the API under a `/v1` prefix.\n\n## Files I would add\n\n```\nsrc/app.ts                      # build(), registers plugins and routes\nsrc/plugins/{auth,errors,locale,cors,swagger,rate-limit}.ts\nsrc/schemas/{common,error,pagination}.ts   # Problem, Page<T>, ErrorCode enum\nsrc/lib/{cursor,api-error}.ts\nsrc/modules/<feature>/{routes,service,repo}.ts\ndb/migrations/001_sessions.sql\nscripts/export-openapi.ts\nopenapi/v1.json                 # committed; the web team consumes this\ndocs/api-contract.md            # a one-page version of this answer\n```\n\nThe web team should code against these four rules:\n1. Send the cookie.\n2. Branch on `code`.\n3. Follow `nextCursor` until it is `null`.\n4. Import types from `openapi/v1.json`."
+}

@@ -1,0 +1,70 @@
+{
+  "id": "E06",
+  "title": "Turkish and unsupported locales",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 10,
+  "max": 10,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-contract",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-contract"
+  ],
+  "turns": 7,
+  "seconds": 41,
+  "cost": 0.1495,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "400 with VALIDATION_ERROR, Turkish general message, details with field/code/Turkish message for email and phone, locale tr, requestId, Content-Language tr all present."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Order header → profile → Accept-Language → en, with unsupported de skipped and not ending the search; the Turkish profile wins."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Codes and field names are explicitly stable and untranslated (INVALID_EMAIL, REQUIRED, email, phone)."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Falls back to the generic Turkish message, not English or a raw key. The missing key is logged and CI check-catalogs fails on missing keys."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "States the header never writes to the profile. The profile changes only via PATCH /me, and a test asserts the profile row is unchanged."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Answering in English or German",
+        "violated": false,
+        "evidence": "The response body and Content-Language are Turkish. English appears only as a last-resort hard-coded string if errors.INTERNAL_ERROR is also missing, which is an edge case rather than the answer."
+      },
+      {
+        "item": "Translated error codes or field names",
+        "violated": false,
+        "evidence": "Codes and fields stay stable and untranslated."
+      },
+      {
+        "item": "Returning 200 with success: false",
+        "violated": false,
+        "evidence": "The response is explicitly 400, not 200."
+      },
+      {
+        "item": "Falling back to raw provider or English text for a supported locale",
+        "violated": false,
+        "evidence": "The answer explicitly says the missing key must not fall through to English or a raw key, and uses the Turkish generic message."
+      }
+    ],
+    "summary": "The answer matches the reference on every rubric item, with no forbidden decisions violated.",
+    "cost": 0.0393272
+  },
+  "answer": "I read the project, but it only contains the node-craft skill files. There is no application code, so the file paths below are proposals. The rules come from `node-craft-contract/references/locale-contract.md` and `errors.md`, and `node-craft-arch/references/i18n.md`.\n\n## The response\n\nThe request fails validation, so it returns HTTP 400 and the body is in Turkish:\n\n```http\nHTTP/1.1 400 Bad Request\nContent-Language: tr\nVary: Accept-Language, X-App-Locale\nCache-Control: private, no-store\nX-Request-Id: 4f9c2d1e-…\n\n{\n  \"error\": {\n    \"code\": \"VALIDATION_ERROR\",\n    \"message\": \"Lütfen işaretli alanları kontrol edin.\",\n    \"details\": [\n      { \"field\": \"email\", \"code\": \"INVALID_EMAIL\", \"message\": \"Geçerli bir e-posta adresi girin.\" },\n      { \"field\": \"phone\", \"code\": \"REQUIRED\",      \"message\": \"Bu alan zorunludur.\" }\n    ]\n  },\n  \"locale\": \"tr\",\n  \"requestId\": \"4f9c2d1e-…\"\n}\n```\n\n- **Status:** it is 400, not 200 and not 422. Both field errors are returned in one response, not just the first.\n- **Details order:** `details` is sorted by `field`, so `email` comes before `phone` and the output is stable.\n- **Stable values:** `code` and `field` never change with the language. Clients branch on those, never on `message`.\n- **Missing phone:** this assumes the schema requires `phone`. If this were a partial PATCH where phone is optional, only `email` would fail. Check the real route schema.\n- **No write:** nothing is persisted, and the `X-App-Locale` header never writes to the profile.\n\n## How the backend decides the language\n\nThe resolution order is:\n\n1. `X-App-Locale`, if valid and supported.\n2. The verified profile's `preferredLocale`.\n3. `Accept-Language`, by quality value.\n4. `en`.\n\nFor this request:\n\n- `de` is not supported, so it is skipped. An unsupported candidate never stops the search and does not fall straight to the fallback.\n- The profile says `tr`, so the locale is `tr` (source `profile`).\n- `Accept-Language: en-US,en` is never reached. The signed-in user's saved preference beats it.\n\nResolve the locale in an `onRequest` hook, after the Firebase token is verified and the profile is loaded, and before validation runs. That way the Ajv errors are already localized. The profile locale is only used for a verified identity. Anonymous requests use steps 1, 3 and 4.\n\n```ts\n// src/shared/i18n/resolve-locale.ts (the contract kit's reference)\nexport function resolveLocale(i: LocaleInput) {\n  const candidates: [LocaleSource, string | undefined][] = [\n    ['header', i.header],\n    ['profile', i.profile],\n    ...parseAcceptLanguage(i.acceptLanguage).map((t): [LocaleSource, string] => ['accept-language', t]),\n  ];\n  for (const [source, tag] of candidates) {\n    const locale = tag ? matchSupported(tag, i.supported) : undefined;\n    if (locale) return { locale, source };\n  }\n  return { locale: i.fallback, source: 'fallback' };\n}\n```\n\n```ts\n// src/app/hooks/locale.ts\napp.addHook('preValidation', async (req) => {\n  const { locale } = resolveLocale({\n    header: req.headers['x-app-locale'] as string | undefined,\n    profile: req.auth?.user.preferredLocale,   // only set after token verification\n    acceptLanguage: req.headers['accept-language'],\n    supported: ['en', 'tr'],\n    fallback: 'en',\n  });\n  req.locale = locale;\n});\n```\n\n- **Hook placement:** the hook is `preValidation` here because the profile needs the auth result. If auth runs in `onRequest`, `onRequest` after auth also works. What matters is that it runs after auth and before validation.\n- **Storage:** the profile locale comes from `users.preferred_locale`. It changes only through `PATCH /me { preferredLocale }`.\n\n```sql\nALTER TABLE users\n  ADD COLUMN preferred_locale text NOT NULL DEFAULT 'en'\n  CONSTRAINT users_preferred_locale_chk CHECK (preferred_locale IN ('en','tr'));\n```\n\nUse a new migration with the expand pattern. If you later add regional variants such as `en-GB`, relax the check constraint.\n\n## What happens if a Turkish message for one key is missing in production\n\nThe response keeps the same status, the same `code` and the same `field`. Only the missing `message` degrades, and it degrades into the safe generic message in Turkish.\n\nExample: `validation.INVALID_EMAIL` is missing from `tr`.\n\n```json\n{ \"field\": \"email\", \"code\": \"INVALID_EMAIL\", \"message\": \"Bir şeyler ters gitti. Lütfen tekrar deneyin.\" }\n```\n\n- **Not English:** it must not fall through to English (`fallbackLng` leaking `en`) or to a raw key such as `validation.INVALID_EMAIL`.\n- **Logging:** the missing key is logged with the `requestId`, and that should feed an alert. The user is never shown an error about the missing key.\n- **Clients:** clients that map `code` to their own catalog are unaffected.\n- **Last resort:** if even `errors.INTERNAL_ERROR` is missing in `tr`, the reference handler returns a hard-coded English string. That is a last resort. Embed a minimal built-in catalog at build time so it is practically unreachable.\n\n```ts\n// src/shared/errors/to-error-response.ts (the reference handler)\nconst message = (key: string) => t(key, locale) ?? generic();\n// src/shared/i18n/translate.ts\nexport const t = (key: string, locale: string) => {\n  if (!i18n.exists(key, { lng: locale, fallbackLng: false })) {\n    log.warn({ key, locale, requestId: currentRequestId() }, 'i18n.missing_key');\n    return undefined;                     // caller substitutes the generic message in the same locale\n  }\n  return i18n.t(key, { lng: locale, fallbackLng: false });\n};\n```\n\nPrevention is a CI check, so this should not reach production:\n\n- **Check script:** `scripts/check-catalogs.ts` fails when any supported locale lacks a key that `en` has.\n- **Registry check:** it also fails when any code in the error registry has no `errors.*` or `validation.*` message in every locale.\n\n## Files I would add or change\n\n- `src/shared/i18n/locales/{en,tr}/errors.json` and `validation.json`: the catalogs. They hold `errors.VALIDATION_ERROR`, `errors.INTERNAL_ERROR`, `validation.INVALID_EMAIL` and `validation.REQUIRED`.\n- `src/shared/i18n/resolve-locale.ts`, `translate.ts` and `src/app/hooks/locale.ts`: the resolver, the missing-key-aware translate function, and the hook.\n- `src/shared/errors/to-error-response.ts`: the central error handler. It maps Ajv `required` to `REQUIRED` and `format: email` to `INVALID_EMAIL`, sorts `details`, and sets `Content-Language`, `Vary` and `Cache-Control`.\n- `migrations/<ts>_users_preferred_locale.sql`: the migration above.\n- `scripts/check-catalogs.ts`, wired into the CI quality gate.\n- The OpenAPI spec: document the 400 with `VALIDATION_ERROR` and the locale headers, then regenerate it.\n\n## Tests (written first, red then green)\n\nEach one goes through `app.inject`:\n\n1. The scenario above: Turkish profile, `X-App-Locale: de`, `Accept-Language: en-US`. Assert status 400, `locale: \"tr\"` and `Content-Language: tr`. Assert the codes and fields are `email/INVALID_EMAIL` and `phone/REQUIRED`, and that the messages are in Turkish.\n2. A valid `X-App-Locale: en` with a Turkish profile returns English, and the profile row is unchanged.\n3. An anonymous request with `de` and `Accept-Language: en-US` returns English through step 3.\n4. A deleted `tr` key returns the Turkish generic message, the same `code` and status, and one `i18n.missing_key` log entry.\n5. A 401 and a 500 each carry no internal text, and the 500 carries only the generic message."
+}

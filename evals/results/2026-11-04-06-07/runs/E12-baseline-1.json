@@ -1,0 +1,62 @@
+{
+  "id": "E12",
+  "title": "Old mobile client and a new API change",
+  "arm": "baseline",
+  "rep": 1,
+  "status": "graded",
+  "score": 9,
+  "max": 10,
+  "percent": 90,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-contract"
+  ],
+  "loadedSkills": [],
+  "turns": 3,
+  "seconds": 55,
+  "cost": 0.1189,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Gives a v1 frozen/v2 versioned approach with a phased rollout, deprecation/sunset, telemetry by app version, and a contract step gated on traffic or a forced-upgrade date."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The v1 adapter defaults currency to a legacy value (and the DB column has a default). It is required only in v2. It also raises the policy question of how v1 should treat non-legacy currencies."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Says old clients may crash on `archived`, so v1 hides archived products and rejects writes to them, with a fallback mapping to `inactive`. It adds an unknown-enum fallback in the new client and checks other consumers."
+      },
+      "R4": {
+        "score": 1,
+        "reason": "Gives golden v1 fixtures captured from real responses, which CI must not allow to change, plus round-trip and contract tests. It does not mention an OpenAPI diff tool, though the fixture check does a similar job."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "Gives a full expand/backfill/trigger/validate/contract sequence with concrete SQL, including the enum migration and rollback considerations."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Renaming and changing the type in place in one release.",
+        "violated": false,
+        "evidence": "Adds a new `unit_price` column and a v2 API, and keeps v1 frozen with `price` as a number until the contract step."
+      },
+      {
+        "item": "Making `currency` required immediately for all clients.",
+        "violated": false,
+        "evidence": "`currency` is required only in v2. v1 defaults it to LEGACY_CURRENCY."
+      },
+      {
+        "item": "Assuming all users update.",
+        "violated": false,
+        "evidence": "Explicitly plans for the 30% of users on slow-updating versions, with v1 kept alive and traffic measured by app version before sunset."
+      }
+    ],
+    "summary": "This is a strong, thorough answer that covers phased versioning, a currency default for old clients, hiding archived products from v1 and expand/contract migrations. Its one gap is that it has no explicit OpenAPI diff in CI.",
+    "cost": 0.0414932
+  },
+  "answer": "The working directory is an empty git repo. It contains only a `.gitignore`, with no routes, schema or client code. So this answer is a design with a proposed layout, not a patch against your code. I assumed a Node/TypeScript HTTP API on Postgres, and the file paths below are suggestions. If your stack differs, the ideas still apply.\n\n## Core decision\n\nDon't change the existing contract. Run an expand/contract migration and add a second API version.\n\n- 30% of users on slow-updating app versions means v1 clients will keep calling the API for months. Renaming a field, changing its type, adding a required field and adding an enum value are each breaking for them. In one release they would show blank prices, fail product creation with a 400, or crash on `archived`.\n- So v1 stays frozen at the old shape: `price` as a number, no `currency`, no `archived`. A v2 exposes the new shape. Both read and write the same table through thin adapters.\n- If there is no versioning today, the existing unversioned paths become v1 unchanged. Mount the new shape under `/v2`.\n\n## Order of rollout\n\n1. **DB expand migration.** It is additive only, so old and new server code both work against it.\n2. **Deploy the server.** It serves v1 and v2 from the new columns.\n3. **Ship the new app.** It uses v2 and tolerates unknown enum values.\n4. **Measure** v1 traffic by app version. Send `Deprecation` and `Sunset` headers on v1 and prompt for upgrades in-app.\n5. **Contract.** Drop `price` and the sync trigger only once v1 traffic is below an agreed threshold, or after a forced-upgrade date.\n\nEach step is independently deployable and reversible, up to the final drop.\n\n## Database\n\nMigration `db/migrations/0042_products_expand.sql`:\n\n```sql\n-- Expand: additive only. Old code keeps working.\nALTER TABLE products\n  ADD COLUMN unit_price numeric(19,4),\n  ADD COLUMN currency   char(3) NOT NULL DEFAULT 'USD';  -- the legacy implicit currency; confirm with the business\n```\n\nThis is metadata-only on Postgres 11 and later, so it is fast. Use the real legacy currency here, because every existing row inherits it.\n\nBackfill in batches (a script or job, not one giant transaction):\n\n```sql\nUPDATE products SET unit_price = price::numeric(19,4)\nWHERE id IN (SELECT id FROM products WHERE unit_price IS NULL LIMIT 5000);\n-- repeat until 0 rows\n```\n\nKeep the two columns in sync with a trigger, so that any writer (v1 code, a stale instance mid-deploy, a script) can't leave them diverged:\n\n```sql\nCREATE FUNCTION products_sync_price() RETURNS trigger AS $$\nBEGIN\n  IF TG_OP = 'INSERT' OR NEW.unit_price IS DISTINCT FROM OLD.unit_price THEN\n    NEW.price := NEW.unit_price;                 -- v2 write wins\n  ELSIF NEW.price IS DISTINCT FROM OLD.price THEN\n    NEW.unit_price := NEW.price::numeric(19,4);  -- v1 write\n  END IF;\n  IF NEW.unit_price IS NULL AND NEW.price IS NOT NULL THEN\n    NEW.unit_price := NEW.price::numeric(19,4);\n  END IF;\n  RETURN NEW;\nEND $$ LANGUAGE plpgsql;\n\nCREATE TRIGGER products_sync_price BEFORE INSERT OR UPDATE ON products\nFOR EACH ROW EXECUTE FUNCTION products_sync_price();\n```\n\nOnce the backfill is done, add the constraint without a long lock:\n\n```sql\nALTER TABLE products ADD CONSTRAINT unit_price_nn CHECK (unit_price IS NOT NULL) NOT VALID;\nALTER TABLE products VALIDATE CONSTRAINT unit_price_nn;\n```\n\nIf `price` is `NOT NULL` and v2 stops writing it, relax that constraint at the same time.\n\n**Status enum.** This depends on how it is stored:\n- **Postgres enum type:** `ALTER TYPE product_status ADD VALUE IF NOT EXISTS 'archived';` in its own migration, committed before any code uses it.\n- **CHECK constraint or text column:** replace the constraint with `NOT VALID`, then `VALIDATE`.\n\nDo this migration before deploying server code that can write `archived`.\n\nContract migration (later, `0050_products_contract.sql`):\n\n```sql\nDROP TRIGGER products_sync_price ON products;\nALTER TABLE products DROP COLUMN price;\n```\n\n## Server\n\nProposed layout:\n```\nsrc/api/v1/products.ts        # frozen adapter (old shape)\nsrc/api/v2/products.ts        # new shape\nsrc/domain/products.ts        # one domain model: unitPrice: string, currency, status\nsrc/domain/money.ts           # decimal parsing/formatting\nsrc/api/versioning.ts         # Deprecation/Sunset headers, version metrics\n```\n\nUse one domain model, with the string decimal and the currency, and do the translation at the edge. Don't fork the business logic.\n\n**v2 schema** (zod):\n```ts\nconst Decimal = z.string().regex(/^\\d{1,15}(\\.\\d{1,4})?$/);\nexport const CreateProductV2 = z.object({\n  name: z.string().min(1),\n  unitPrice: Decimal,\n  currency: z.string().regex(/^[A-Z]{3}$/),   // required\n  status: z.enum(['draft','active','inactive','archived']).default('draft'), // adjust to your real values\n});\n```\nNever use JS `number` for money in the domain layer. Keep the decimal as a string, or use `decimal.js`. Validate scale against the currency's minor units (JPY 0, USD 2).\n\n**v1 adapter**, which is where compatibility lives:\n\n```ts\n// request: v1 sends { price: 12.5 } and no currency\nexport function fromV1Create(body: V1Create): DomainCreate {\n  return {\n    ...body,\n    unitPrice: toDecimalString(body.price),   // via String/toFixed(4), never arithmetic\n    currency: LEGACY_CURRENCY,                // default for old clients: 'USD'\n  };\n}\n\n// response\nexport function toV1(p: Product) {\n  const { unitPrice, currency, ...rest } = p;\n  return { ...rest, price: Number(unitPrice) };\n}\n```\n\n**Currency in v1.** `Number(unitPrice)` is only meaningful if the currency is the legacy one. Pick one of these policies explicitly, because it is a product decision:\n- v1 only lists and returns products whose currency is the legacy one. This is safest, and it means v1 users don't see new-currency products.\n- Or v1 returns the number regardless. This risks showing \"12.50\" for a EUR or JPY product in a USD-formatted UI. I'd avoid it.\n\n**Enum value `archived`.** Old clients will likely crash or mis-render an unknown enum value. In v1:\n- Exclude archived products from list endpoints and search.\n- Return 404/410 for GET of a single archived product.\n- Reject v1 writes that touch an archived product with a clear 409.\n- v1 can't set `archived`; its schema doesn't allow it.\n- If you can't hide the product, map `archived` to the closest legacy value (e.g. `inactive`). Hiding is cleaner.\n\nCheck every other consumer of product data for the same problem: webhooks, CSV exports, analytics events, and search index documents. Version those too, or filter out `archived` for them.\n\n**Version telemetry and sunset:**\n```ts\nres.set('Deprecation', 'true');\nres.set('Sunset', 'Sat, 01 Aug 2027 00:00:00 GMT');\nmetrics.increment('api.requests', { version: 'v1', appVersion: req.get('X-App-Version') });\n```\nThis lets you see how much of the 30% is actually still on v1, and decide the contract date from data.\n\n## Client\n\n- The new app talks to `/v2`, parses `unitPrice` as a string (formatting with `Intl.NumberFormat` or a decimal lib, with no float math), and always sends `currency`.\n- Add an unknown-enum fallback for `status`: unrecognized values render as a neutral state, not a crash. That makes future enum additions non-breaking.\n- Add a minimum-supported-version check. Before the sunset date, show a soft prompt to old versions. At the sunset date, force the update.\n\n## Tests\n\n- **Contract tests** with golden fixtures for both versions (`tests/contract/v1/*.json`, `v2/*.json`). The v1 fixtures are captured from today's real responses and must never change. CI should fail if they do.\n- **Round trip:** create via v1 then read via v2, and the reverse. Assert the amounts match exactly, including `0.1`, `19.99` and large values.\n- **Migration test** on a production-sized snapshot, to confirm the lock behaviour and the backfill duration.\n- **Archived product:** assert that v1 never returns it and v2 does.\n- **Dual-write trigger:** assert that a direct write to either column keeps the other in sync.\n\n## Risks and things to confirm\n\n- **Legacy currency:** what it really is, and whether all existing data was in it. If not, the backfill needs a per-row source.\n- **Float to decimal:** the old `price` may already contain float artifacts (e.g. `19.989999`). Round during backfill, and report rows that changed by more than half a minor unit.\n- **Sunset date:** decide it from the v1 traffic metrics, not from a guess. At four months of app history and slow updaters, expect a long tail.\n- **Rollback:** until the contract migration, you can roll back the server and the app without data loss, because the old column is still populated. After the drop, rollback means restoring from a backup, so make the drop a separate, deliberate release."
+}

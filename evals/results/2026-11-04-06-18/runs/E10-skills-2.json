@@ -1,0 +1,64 @@
+{
+  "id": "E10",
+  "title": "Language change before a queued notification",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 10,
+  "max": 10,
+  "percent": 100,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-arch"
+  ],
+  "loadedSkills": [
+    "node-craft-arch"
+  ],
+  "turns": 7,
+  "seconds": 36,
+  "cost": 0.1345,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Uses the recipient's current preferred_locale at send time and rejects the admin's language. A snapshot is mentioned only as a deliberate, documented choice, which the answer declines to make."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The payload is {v, recipientId, template, templateVersion, params:{applicationId}}. It holds no rendered text and no extra personal data."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Preferences are checked at send time (notif_prefs, with push-off marked skipped). The push body is non-sensitive and carries only a deep link, with details fetched after authentication."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "A unique (event_id, user_id, channel) delivery row guards against duplicates. The answer states the residual crash-after-send duplicate risk and suggests a provider idempotency key."
+      },
+      "R5": {
+        "score": 2,
+        "reason": "It includes an explicit test that switches the locale from tr to en after approval and before the worker runs. The test checks that both email and push are in English."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Using the admin's language",
+        "violated": false,
+        "evidence": "\"The admin's language never decides.\""
+      },
+      {
+        "item": "Rendering the text when queuing and sending it later",
+        "violated": false,
+        "evidence": "\"Do not pre-render the message\"; the payload holds only ids, template key and params."
+      },
+      {
+        "item": "Non-idempotent sending without acknowledging duplicate risk",
+        "violated": false,
+        "evidence": "The unique delivery row makes the handler idempotent, and the answer names the residual at-least-once risk."
+      }
+    ],
+    "summary": "The answer matches the reference on every rubric item and violates none of the forbidden decisions.",
+    "cost": 0.0367732
+  },
+  "answer": "**Use English, the user's current language at send time. The admin's language never decides.** The user saved English before the job ran, so the email and the push both go out in English. The job must not carry a rendered Turkish message. It carries ids and parameters, and the worker resolves the locale when it sends.\n\nI read the working directory first. It holds only the `.claude/skills/node-craft-*` rules and no application code, so the files below are what I would add in a backend that follows them. The rules come from the `notifications.md`, `outbox.md` and `i18n.md` references.\n\n## Decisions and reasons\n\n1. **The recipient's language decides.** It is `users.preferred_locale` at the moment of sending. The admin who approved the application is only the actor.\n2. **Treat approval as a status notice, not a legal one.** The user's latest choice should win, and sending Turkish after they chose English would ignore it. A locale snapshot at the event would only be right for a legal notice. If the business wants that, store it deliberately as `locale_snapshot` and document it. Here I would not.\n3. **Do not pre-render the message.** The job payload is `{ v:1, recipientId, template:'application_approved', templateVersion:1, params:{ applicationId } }`. It holds no subject, body or language. This keeps personal data out of the queue and lets the locale be resolved late.\n4. **Write the approval and the outbox row in one transaction.** A crash must not approve without queuing the notification, or queue it for an approval that rolled back. Postgres and Redis are two systems, so an outbox is justified here. Approval followed by notification is a \"must not be lost\" flow.\n5. **Make the job idempotent in the database.** Delivery is at least once, so retries and redispatch can run the job twice. A unique row per channel stops a second email or push.\n6. **Do no provider calls inside a transaction.** Read the user and the delivery row, commit, then call the email provider or FCM.\n7. **Check the current state at send time.** This covers locale, notification preferences, device bindings and whether the user still exists.\n8. **Keep the push body non-sensitive.** The push carries a title, a short body and a versioned deep link, `{ v:1, route:'application', id }`. The app fetches details after authentication.\n9. **Say what the user sees.** Between approval and delivery there is a short delay (the email may take a minute). Creating the outbox row does not prove the notification arrived.\n\n## Files I would add or change\n\n- `migrations/XXXX_notification_deliveries.sql`: the delivery table below. Add `outbox` if the project does not have it yet (see `outbox.md`).\n- `src/modules/applications/approve-application.usecase.ts`: update the application and insert the outbox row in one transaction.\n- `src/shared/outbox/dispatcher.ts`: claims rows with `FOR UPDATE SKIP LOCKED` and enqueues BullMQ with `jobId = outbox.id`. It runs in the worker process.\n- `src/modules/notifications/send-notification.usecase.ts`: the worker handler.\n- `src/modules/notifications/render.ts`: renders from the catalogs, with escaped HTML parameters.\n- `src/shared/i18n/locales/{tr,en}/{emails,notifications}.json`: keys `application_approved.v1.{subject,body,push_title,push_body}`.\n- `tests/`: integration tests on real Postgres, listed at the end.\n\n## Key SQL\n\n```sql\nCREATE TABLE notification_deliveries (\n  id           uuid PRIMARY KEY,\n  event_id     uuid NOT NULL,                 -- the outbox id\n  user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,\n  channel      text NOT NULL CHECK (channel IN ('email','push')),\n  locale       text,                          -- what was actually used, for audit\n  status       text NOT NULL DEFAULT 'pending'\n               CHECK (status IN ('pending','sent','skipped','failed')),\n  sent_at      timestamptz,\n  UNIQUE (event_id, user_id, channel)\n);\n```\n\nThe approval use case writes both rows in one transaction:\n\n```ts\nawait db.tx(async (t) => {\n  const { rowCount } = await t.query(\n    `UPDATE applications SET status='approved', decided_by=$2, decided_at=now()\n     WHERE id=$1 AND status='pending'`, [id, adminId]);\n  if (!rowCount) throw new Conflict('APPLICATION_NOT_PENDING'); // double approve: no second effect\n  await t.query(\n    `INSERT INTO outbox (id, topic, payload) VALUES ($1,'notification.send',$2)`,\n    [eventId, { v:1, recipientId: applicantId, template:'application_approved',\n                templateVersion:1, params:{ applicationId: id } }]);\n});\n```\n\nThe worker does this for each channel:\n\n```ts\n// 1. short tx: claim the delivery (idempotency guard)\nconst claimed = await db.query(\n  `INSERT INTO notification_deliveries (id,event_id,user_id,channel)\n   VALUES (gen_random_uuid(),$1,$2,$3) ON CONFLICT DO NOTHING RETURNING id`,\n  [eventId, recipientId, channel]);\n// A row that already exists in 'sent' means skip. A row left 'pending' by a crash\n// is retried: re-select it and continue.\n\n// 2. read CURRENT state, no tx held open\nconst u = await db.one(\n  `SELECT email, preferred_locale, time_zone, notif_prefs FROM users WHERE id=$1`, [recipientId]);\nconst locale = resolveSupported(u.preferred_locale) ?? DEFAULT_LOCALE; // 'en-GB' -> 'en'\n\n// 3. render and send outside any transaction\n//    email: render(template, version, locale, params); push: only to devices currently\n//    bound to this user, deleting tokens FCM reports as invalid.\n\n// 4. mark sent and store the locale used\nawait db.query(\n  `UPDATE notification_deliveries SET status='sent', sent_at=now(), locale=$2 WHERE id=$1`,\n  [id, locale]);\n```\n\nIf the provider call succeeds and the process crashes before step 4, a retry can send once more. That is the residual at-least-once risk. Use the provider's idempotency key where it exists, otherwise document it.\n\n## Job design\n\n- **Retries:** BullMQ with bounded attempts and exponential backoff. After the cap the outbox row is parked for inspection, not deleted.\n- **Channels:** email and push are separate deliveries. A push failure must not resend the email.\n- **Missing key:** a missing template key in a supported locale falls back to the safe generic message in that locale and is logged. It never falls back to another language silently. CI fails if `tr` has a key that `en` lacks, or the reverse.\n- **Formatting:** dates and numbers use `Intl` with the resolved locale and `time_zone`.\n\n## Tests\n\n- Change the locale from `tr` to `en` after approval and before the worker runs. Both the email and the push come out in English. This is the \"locale changed before a queued notification\" case.\n- Run the same job twice. Exactly one email and one push result, and the unique constraint holds under concurrent workers.\n- Fail the approval transaction. Neither a business row nor an outbox row remains.\n- Approve the same application twice. The second call returns `409`, and there is one outbox row.\n- Sign out or switch accounts on the device. The old account's token no longer receives the push.\n- Turn push off in preferences. The delivery is marked `skipped`.\n- Send with a missing parameter. The test fails, not a customer email."
+}
