@@ -13,9 +13,9 @@ Write down, per environment:
 | Encryption and access | Encrypted at rest; who can read and restore backups |
 | Deletion | How long deleted personal data survives in backups; documented for privacy requests |
 
-Railway (checked 2026-11-04): volume backups with daily, weekly and monthly schedules and manual backups; a restore
-creates a new volume in the same project and environment. Check what your plan provides on the day; do not assume
-point-in-time recovery or high availability.
+Managed databases differ: some offer daily snapshots only, some point-in-time recovery, some restore only into a new
+instance or the same project. Check what your platform and plan provide on the day; do not assume point-in-time
+recovery or high availability.
 
 ## Restore tests
 

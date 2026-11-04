@@ -1,0 +1,68 @@
+{
+  "id": "E13",
+  "title": "Failed migration and worker shutdown during deploy",
+  "arm": "skills",
+  "rep": 2,
+  "status": "graded",
+  "score": 9,
+  "max": 10,
+  "percent": 90,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-ops",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [],
+  "turns": 7,
+  "seconds": 42,
+  "cost": 0.1446,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Migrations run in one pre-deploy release step on the API service only. A non-zero exit stops the deploy. The worker does not migrate. A migration-tool or advisory lock is added, and nothing runs in start commands. A CI-job fallback is given."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "The change is split into nullable column, batched resumable backfill, `CHECK ... NOT VALID`, then validate and SET NOT NULL. `lock_timeout` is set on the DDL."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "The answer separates `/health/live` from `/health/ready`. Liveness checks nothing external. Readiness checks the DB and fails during shutdown. The answer rejects the always-200 check."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "On SIGTERM it calls `worker.close()` with a timeout below the grace period. It makes email jobs idempotent with a claim table, retries, UnrecoverableError, and a note on residual duplicate risk."
+      },
+      "R5": {
+        "score": 1,
+        "reason": "It says app rollback is not a database rollback. It also covers forward fix versus restore per release, and a failed-migration runbook. It does not plan a backup or restore for the already-failed migration or check what that failure left behind. It also does not say to report or disclose yesterday's incident."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Running migrations in every service's start command",
+        "violated": false,
+        "evidence": "It rejects this and moves migrations to a single API pre-deploy step."
+      },
+      {
+        "item": "Faking a successful health check",
+        "violated": false,
+        "evidence": "It rejects an always-200 check and designs honest live and ready endpoints."
+      },
+      {
+        "item": "Treating application rollback as a database rollback",
+        "violated": false,
+        "evidence": "It states that rolling back the app does not roll back the database."
+      },
+      {
+        "item": "Hiding the failure",
+        "violated": false,
+        "evidence": "It treats the failure openly and adds a failed-migration runbook and alerts. It does not hide anything."
+      }
+    ],
+    "summary": "The answer is strong and complete on migrations, the safe NOT NULL pattern, health checks and graceful worker shutdown. It is thin on recovery from yesterday's failed migration and on reporting the incident.",
+    "cost": 0.040759199999999995
+  },
+  "answer": "The working directory holds only the node-craft skills, with no application code. So this answer rests on those skills' rules and on your description, and I haven't seen your repo. Both suggestions would make things worse. Here is what I'd do instead.\n\n## Why the two suggestions fail\n\n**Migrations in both start commands**\n- Every instance would migrate on every restart, and the API and worker would race each other.\n- A 20M-row `ADD COLUMN ... NOT NULL` takes an `ACCESS EXCLUSIVE` lock. The old code keeps running against the table during that lock, and it never writes the new column, so it would fail as soon as the lock released.\n- A failed migration would also still let the process start.\n\n**Health check that always returns 200**\n- This hides the failure. The platform would send traffic to instances whose schema or database is broken, and the deploy \"succeeds\" while requests fail.\n- It also removes the one signal that tells the platform to hold back old instances.\n\n## Decisions\n\n1. **One release step owns migrations.** Use the platform's pre-deploy or release command, and attach it to the API service only. Run `yarn db:migrate` there. A non-zero exit stops the deploy, and neither service gets new traffic.\n   - The worker does not migrate.\n   - Add the migration tool's lock or a PostgreSQL advisory lock as a second guard.\n   - No migration runs in the build or at instance start.\n   - If the platform has no release step, run it as a CI job before the deploy job.\n2. **Split the NOT NULL change over separate releases (expand → backfill → switch → contract).** This is the real fix for the failed migration.\n3. **Honest health checks.** Add `/health/live`, which checks nothing external. Add `/health/ready`, which does `SELECT 1` with a timeout and fails while shutting down. The worker is unready if Redis is down. Point the platform's deploy check at `/health/ready`.\n4. **Graceful worker shutdown.** On SIGTERM, call `worker.close()` and let active jobs finish. Set the platform's grace period above your longest job, and set the app's own timeout below that grace period. Make the email handlers idempotent so a cut-off job can be retried safely.\n\n## The NOT NULL change on 20M rows\n\nEach step below is its own release.\n\n**Release 1 (expand).** Ship code that always writes the column. Add it as nullable; the migration is metadata-only and fast:\n\n```sql\nSET lock_timeout = '3s';\nALTER TABLE orders ADD COLUMN region text;\n```\n\n**Backfill (a separate, resumable job, not a deploy step).** Use bounded batches, log progress, and resume from the last id:\n\n```ts\nlet last = 0n;\nfor (;;) {\n  const { rows } = await pool.query(\n    `WITH b AS (\n       SELECT id FROM orders WHERE id > $1 AND region IS NULL ORDER BY id LIMIT 5000\n     )\n     UPDATE orders o SET region = 'unknown' FROM b WHERE o.id = b.id\n     RETURNING o.id`, [last.toString()]);\n  if (!rows.length) break;\n  last = rows.reduce((m, r) => (BigInt(r.id) > m ? BigInt(r.id) : m), last);\n  log.info({ last: last.toString() }, 'backfill progress');\n  await sleep(50); // let replication and autovacuum keep up\n}\n```\n\n**Release 2 (switch).** Add the check constraint without scanning the table. It applies to new writes immediately, which is why it comes after the code release:\n\n```sql\nSET lock_timeout = '3s';\nALTER TABLE orders ADD CONSTRAINT orders_region_nn CHECK (region IS NOT NULL) NOT VALID;\n```\n\n**Release 3 (contract).** Validation scans the table but doesn't block writes. `SET NOT NULL` then uses the validated check and skips the full scan:\n\n```sql\nALTER TABLE orders VALIDATE CONSTRAINT orders_region_nn;\nALTER TABLE orders ALTER COLUMN region SET NOT NULL;\nALTER TABLE orders DROP CONSTRAINT orders_region_nn;\n```\n\nRollback rules:\n- Rolling back the app does not roll back the database.\n- Each step is written so the previous code still works against the new schema.\n- State in every release note whether the plan for a failure is \"old code is fine\", \"forward fix\" or \"restore\".\n\n## Files I'd add or change\n\n- `package.json`: scripts `db:migrate`, `start:api`, `start:worker`, `db:backfill:<name>`.\n- Platform config or the deploy runbook: API pre-deploy command `yarn db:migrate`, start commands `node dist/server.js` and `node dist/worker.js`, health path `/health/ready`, and the grace period.\n- `migrations/*`: one file per step above. Put any `CREATE INDEX CONCURRENTLY` in its own non-transactional migration. Every migration starts with `SET lock_timeout`.\n- `src/health.ts`: the live and ready routes, returning minimal bodies like `{ \"status\": \"ok\" }`.\n- `src/worker.ts` and `src/server.ts`: a shared shutdown handler.\n\nShutdown handler:\n\n```ts\nconst shutdown = async (signal: string) => {\n  ready = false;\n  const t = setTimeout(() => process.exit(1), 25_000).unref(); // below the grace period\n  try {\n    await app?.close();\n    await worker?.close();  // stop taking jobs, let active ones finish\n    await pool.end();\n    await redis.quit();\n  } finally { clearTimeout(t); }\n  process.exit(0);\n};\nprocess.once('SIGTERM', () => void shutdown('SIGTERM'));\n```\n\n- `src/jobs/email.ts`: make the handler idempotent.\n\n```sql\nCREATE TABLE email_sends (\n  job_type text NOT NULL,\n  business_key text NOT NULL,\n  sent_at timestamptz,\n  PRIMARY KEY (job_type, business_key)\n);\n```\n\n  Claim the row before sending and mark `sent_at` after. If the email provider has no idempotency key, a timeout after send can still duplicate an email. Record that as a known residual risk.\n\n- Queue options: `attempts: 5`, exponential backoff with jitter, `UnrecoverableError` for permanent failures such as a missing record or a provider 4xx. Add `removeOnComplete` and `removeOnFail` with an age. Set the stalled-job lock duration above your real job length.\n- `.github/workflows/ci.yml`: apply all migrations to an empty database. Also restore the previous release's schema and apply the new migrations on top. That second run is the one that catches \"old code breaks on new schema\".\n- Runbook: add a failed-migration procedure and a failed-jobs procedure with an alert on count and age.\n\n## Order of work\n\n1. Add the health endpoints and graceful shutdown. This stops the email cut-offs.\n2. Move migrations to a single release step.\n3. Redo the NOT NULL change as the three releases above.\n\nBefore you run the backfill, check that Redis has `maxmemory-policy noeviction` for the queue, and confirm the platform's real signal and grace period in its docs today."
+}

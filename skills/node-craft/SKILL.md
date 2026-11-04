@@ -30,7 +30,7 @@ it by name (`node-craft` → TDD, `node-craft` → done).
 | Endpoints, OpenAPI, validation, error model, locale header, pagination, idempotency keys, versioning, client integration | `node-craft-contract` |
 | A bug, a failing test or a regression | `node-craft-fix` |
 | Slow endpoint, query, pool exhaustion, event loop lag, queue backlog, load test | `node-craft-perf` |
-| Railway, CI gates, migration release, health checks, shutdown, backup and restore, runbooks | `node-craft-ops` |
+| Deployment on any platform, CI gates, migration release, health checks, shutdown, backup and restore, runbooks | `node-craft-ops` |
 
 Most features need two: `node-craft-contract` for the API surface and `node-craft-arch` for what is behind it.
 
@@ -78,7 +78,7 @@ business rule and contract correct · TDD followed and reported honestly · exis
 justified · authentication, authorization and tenant isolation · user messages in the right language, machine codes
 stable · constraints, indexes, transactions and concurrency handled · idempotency on critical writes · query and
 performance budget checked · no secret or personal data in logs, errors or payloads · migrations, OpenAPI, tests and
-docs updated · Railway build, start and health check verified, or the unverified part named.
+docs updated · build, start, release step and health check verified on the project's platform, or the unverified part named.
 
 ## 5. Report
 

@@ -34,7 +34,7 @@ node-craft gives the agent the rules and the order of work that prevent these, a
   messages, a locale header with a clear resolution order, cursor pagination, idempotency keys.
 - **Only what the product needs.** Redis, BullMQ, Firebase, FCM, Adapty and object storage are added for a reason,
   never by default.
-- **Ready to run.** Railway build, pre-deploy migrations, honest health checks, graceful shutdown, CI gates, backups
+- **Ready to run anywhere.** No hosting platform assumed: one release step for migrations, honest health checks, graceful shutdown, CI gates, backups
   and restore tests.
 
 ## Quick start
@@ -48,7 +48,7 @@ Each skill folder is self-contained; you can install only the ones you want, and
 keep.
 
 Then ask in plain words: *"set up a backend for a bookshop API"*, *"add an endpoint to list my invoices"*, *"the
-orders list is slow"*, *"this webhook sometimes grants premium twice"*, *"prepare the Railway deploy"*. The right skill
+orders list is slow"*, *"this webhook sometimes grants premium twice"*, *"prepare the deploy"*. The right skill
 loads on its own.
 
 No client is required. A backend with no client yet, a web or admin app, a native mobile app and a React Native app
@@ -64,7 +64,7 @@ all use the same skills.
 | [`node-craft-contract`](skills/node-craft-contract/SKILL.md) | Adding or changing an endpoint, integrating a client | OpenAPI from one source, runtime validation, error envelope and status mapping, locale header, cursor pagination, `Idempotency-Key`, auth outcomes, versioning for old mobile clients |
 | [`node-craft-fix`](skills/node-craft-fix/SKILL.md) | Something is broken | Baseline, reproduce through the real entry point, regression test, smallest fix, proof |
 | [`node-craft-perf`](skills/node-craft-perf/SKILL.md) | Something is slow | Budgets, `EXPLAIN`, N+1, indexes, pool and connection budget, event loop, load tests, before/after numbers |
-| [`node-craft-ops`](skills/node-craft-ops/SKILL.md) | Deploying and running | Railway services, pre-deploy migrations, health checks, graceful shutdown, CI gates, backup and restore, runbooks |
+| [`node-craft-ops`](skills/node-craft-ops/SKILL.md) | Deploying and running | Any platform: build, start, release-step migrations, health checks, graceful shutdown, CI gates, backup and restore, runbooks |
 
 A project's `STACK.md`, ADRs and existing code override the defaults. The template is in
 [`skills/node-craft-init/references/stack-template.md`](skills/node-craft-init/references/stack-template.md).
@@ -96,7 +96,7 @@ mistakes that matter cannot be seen in syntax, so node-craft does not ship a lin
 | API | REST + OpenAPI, runtime validation, `{ data, meta }`, `{ error: { code, message, details }, locale, requestId }` |
 | Tests | Vitest or Jest, integration tests on real PostgreSQL |
 | Logs | Pino JSON with redaction and request ids |
-| Deploy | Railway |
+| Deploy | Any platform; the project's choice, recorded with how its release step, health checks and shutdown work |
 | Optional | Redis, BullMQ, outbox, Firebase Admin, FCM, Adapty, object storage: only when needed |
 
 ## With rn-craft (optional)

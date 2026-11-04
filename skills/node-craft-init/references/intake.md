@@ -16,7 +16,7 @@ rest, choose a sensible default and write it down as an assumption.
 | Languages | Supported locales, where the user's locale is stored, notification and email needs |
 | Consistency | Duplicate requests, offline sync, concurrent updates |
 | Integrations | Adapty, FCM, email, storage and other external services |
-| Operations | Railway environments, budget, who has access, backups, acceptable downtime |
+| Operations | Hosting platform (if already chosen), environments, budget, who has access, backups, acceptable downtime |
 | Quality | Critical flows, latency targets, data loss tolerance, test coverage expectations |
 
 ## Rules

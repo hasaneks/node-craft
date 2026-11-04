@@ -36,7 +36,7 @@ Risky changes go **expand → migrate data → switch code → contract**, each 
 
 ## Release
 
-- Migrations run in one authorized release step (Railway pre-deploy command or a one-off job), never at every replica
+- Migrations run in one authorized release step (the platform's release or pre-deploy step, or a one-off job), never at every replica
   start. Use the migration tool's lock (or a PostgreSQL advisory lock) so two runners cannot race.
 - If the migration fails, the new version receives no traffic. The pre-deploy step failing must stop the deploy.
 - Rolling back the application does not roll back the database. Each release says which applies: the old code works

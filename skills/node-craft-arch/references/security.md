@@ -20,7 +20,7 @@
   `rejectUnauthorized: false` or `NODE_TLS_REJECT_UNAUTHORIZED=0` in production.
 - CORS lists the real web origins per environment. Wildcard CORS is not protection, and CORS does not protect mobile
   or server-to-server calls at all.
-- Behind a proxy (Railway), configure the trusted proxy setting to the known hop count or ranges so `request.ip` and
+- Behind a proxy or load balancer, configure the trusted proxy setting to the known hop count or ranges so `request.ip` and
   protocol are correct. Do not trust every `X-Forwarded-For` value.
 - Security headers with `@fastify/helmet` (or the Nest equivalent) where responses reach browsers.
 

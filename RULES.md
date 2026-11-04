@@ -83,7 +83,7 @@ doubles as such.
 **Rule:** New projects use the current Active LTS Node.js at its latest patch, verified on the day, pinned in project
 metadata, CI and the deploy build.
 **Why:** Current lines change fast and leave support; mismatched versions break builds.
-**How:** Check the official release page; set `engines`, `.nvmrc`, CI `node-version-file` and the Railway build.
+**How:** Check the official release page; set `engines`, `.nvmrc`, CI `node-version-file` and the deploy build.
 **Verify:** `review` of `package.json`, `.nvmrc` and CI config.
 **Exceptions:** A dependency that does not yet support the new line; stay on the previous LTS and record why.
 **Skill:** `node-craft-init` → `references/toolchain.md`
@@ -447,14 +447,14 @@ limit with headroom; timeouts set and documented.
 
 ## Operations
 
-### migrate-once-in-pre-deploy
-**Rule:** Migrations run once per release in the pre-deploy step with a lock; a failure stops the release; build never
-migrates.
+### migrate-once-in-release-step
+**Rule:** Migrations run once per release in a single release step (the platform's release or pre-deploy step, or a
+CI job before the deploy) with a lock; a failure stops the release; build never migrates.
 **Why:** Replicas racing to migrate, or new code receiving traffic on a failed schema, corrupt releases.
-**How:** Railway pre-deploy command on one service; migration tool lock.
+**How:** One service owns the release step; migration tool lock or advisory lock.
 **Verify:** `review` of deploy configuration; staging run.
 **Exceptions:** None.
-**Skill:** `node-craft-ops` → `references/railway.md`
+**Skill:** `node-craft-ops` → `references/deployment.md`
 
 ### honest-health-checks
 **Rule:** Separate liveness and readiness; readiness checks required dependencies with timeouts; responses reveal

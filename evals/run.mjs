@@ -98,6 +98,10 @@ function claude(cwd, prompt, model, tools) {
         if (event.type === 'assistant') {
           for (const part of event.message?.content ?? []) {
             if (part.type === 'tool_use' && part.name === 'Skill') skills.push(part.input?.skill);
+            // Agents sometimes read the skill files directly instead of loading them; count that as use too.
+            const path = part.type === 'tool_use' ? (part.input?.file_path ?? part.input?.path ?? '') : '';
+            const read = /\.claude\/skills\/([\w-]+)\//.exec(path);
+            if (read) skills.push(read[1]);
           }
         }
         if (event.type === 'result') result = event;

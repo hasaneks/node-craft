@@ -13,7 +13,8 @@ lives in its own root, give it its own `STACK.md` and link the shared one.
 ### Service
 - Name: example-api · Owner: <team>
 - Clients: mobile (React Native), web admin · Old client support window: 2 minor app versions or 90 days
-- Deploy: Railway · Services: api, worker · Regions: <verified region>
+- Deploy: <platform, see ADR> · Services: api, worker · Region: <verified region>
+- Platform mapping: release step = <...> · health check = <path, deploy-only or continuous> · grace period = <s>
 
 ### Decisions (ADRs in docs/adr/)
 - Framework: Fastify 5 (ADR 0001)

@@ -26,7 +26,7 @@ Short, tested steps in `docs/runbooks/`. Each alert links to its runbook and has
 | Outbox lag | Oldest pending age, dispatcher health, parked messages after max attempts |
 | Webhook replay | Find events by provider id and time range; reprocess through the same idempotent handler; or request redelivery from the provider |
 | Wrong data deleted | Stop the cause; estimate scope with read-only queries; restore into an isolated database and copy back the affected rows with an approved script |
-| Failed migration | Deploy is stopped (pre-deploy failed); read the error; fix forward with a new migration; restore only with approval |
+| Failed migration | Deploy is stopped (release step failed); read the error; fix forward with a new migration; restore only with approval |
 | Provider outage | Confirm on the provider status page; let retries and the outbox hold work; communicate; reconcile after recovery |
 | Redis down | Behaviour per use as documented (cache bypass, rate limit fallback, queue producers failing visibly); restore and verify queue settings (`noeviction`) |
 | Restore from backup | Follow `references/backup-restore.md`; record times against RPO and RTO |

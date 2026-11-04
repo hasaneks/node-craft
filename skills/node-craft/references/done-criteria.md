@@ -20,7 +20,7 @@ question with evidence (a test, a command output, a file).
 | Performance | Is the endpoint and query inside its budget with realistic data? | `EXPLAIN`, query count, load result |
 | Privacy | Do logs, errors, events and payloads leave out secrets and unneeded personal data? | Redaction test, log sample |
 | Docs | Are migration notes, OpenAPI, ADRs, `.env.example` and runbooks updated? | Diff |
-| Operations | Do build, start, health check and migration release work on Railway (or the project's platform)? | Staging run, or named gap |
+| Operations | Do build, start, health check and migration release work on the project's platform? | Staging run, or named gap |
 
 ## Reporting
 

@@ -44,8 +44,8 @@ Confirm from the installed BullMQ version's docs: the minimum Redis version, per
 
 ## Process lifecycle
 
-- Separate worker entry (`yarn start:worker`), same image as the API when that is simpler; scaled as its own Railway
-  service.
+- Separate worker entry (`yarn start:worker`), same image as the API when that is simpler; scaled as its own service on
+  the platform.
 - Graceful shutdown: on `SIGTERM`, `worker.close()` (stop taking jobs, let active ones finish within the platform's
   grace period), then close Redis and the DB pool. Test that a job interrupted by shutdown is safely retried.
 - Stalled job settings match the real job length; long jobs report progress or extend their lock.

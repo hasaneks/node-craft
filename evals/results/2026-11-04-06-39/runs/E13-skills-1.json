@@ -1,0 +1,68 @@
+{
+  "id": "E13",
+  "title": "Failed migration and worker shutdown during deploy",
+  "arm": "skills",
+  "rep": 1,
+  "status": "graded",
+  "score": 9,
+  "max": 10,
+  "percent": 90,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-ops",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [],
+  "turns": 7,
+  "seconds": 50,
+  "cost": 0.1646,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Single release/pre-deploy step on one service (API), non-zero exit stops deploy, advisory lock plus lock_timeout, no migrations in start commands or build."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Expand with nullable column, batched resumable backfill, CHECK NOT VALID then VALIDATE then SET NOT NULL, lock_timeout, CONCURRENTLY indexes."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Separate /health/live (no external checks) and /health/ready returning 503 when unhealthy; explicitly rejects always-200."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "worker.close() on SIGTERM with a timer below the grace period, idempotency table with ON CONFLICT, retries, and a kill-mid-job test."
+      },
+      "R5": {
+        "score": 1,
+        "reason": "Covers forward fix vs restore, backup and tested restore, 'rolling back the app does not roll back the database', and 'stop and report the state'. However it lacks a concrete recovery plan for yesterday's failed migration (checking for partial state, invalid indexes aside), and the report is framed as a process rule rather than an explicit incident disclosure."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Running migrations in every service's start command",
+        "violated": false,
+        "evidence": "Explicitly rejected: 'Neither runs migrations. The build never migrates.'"
+      },
+      {
+        "item": "Faking a successful health check",
+        "violated": false,
+        "evidence": "'Health check always returns 200... Health checks must tell the truth.' with real 503 readiness."
+      },
+      {
+        "item": "Treating application rollback as a database rollback",
+        "violated": false,
+        "evidence": "'Rolling back the app does not roll back the database.'"
+      },
+      {
+        "item": "Hiding the failure",
+        "violated": false,
+        "evidence": "'If a release fails, stop and report the state it left.'"
+      }
+    ],
+    "summary": "A strong answer that meets nearly all reference points with correct SQL and shutdown code, losing a little on a concrete recovery and incident-reporting plan for the failed migration.",
+    "cost": 0.043021199999999996
+  },
+  "answer": "The working directory holds only the node-craft skill files, not your application. So this answer follows the project's own rules in `node-craft-ops/references/deployment.md`, `health-shutdown.md` and `node-craft-arch/references/migrations.md` and `queues-workers.md`. The file names below are what I would add to your repo.\n\n## Reject both suggestions\n\n**Migrations in both start commands.** Every replica of both services would then race to run DDL on each restart. A slow `ALTER` on 20M rows would run while the old code is still serving. The service that fails to migrate would still be started. The rule is one release step per release, never at instance start.\n\n**Health check always returns 200.** This hides the failure instead of fixing it. The platform would send traffic to instances whose schema or Redis connection is broken. Health checks must tell the truth.\n\n## What went wrong\n\n1. **The migration was unsafe.** A plain `ADD COLUMN ... NOT NULL` or `SET NOT NULL` on 20M rows takes an `ACCESS EXCLUSIVE` lock and scans or rewrites the table. If it also backfills in one `UPDATE`, it runs for a long time and can hit the platform's release timeout.\n2. **Migration ran in the wrong place or in both services**, so a failure left the deploy half-done.\n3. **The worker had no graceful shutdown.** `SIGTERM` killed active jobs. The grace period was probably shorter than the job time, or `worker.close()` was never called.\n\n## Fix 1: split the NOT NULL change into separate releases\n\nEach step ships on its own, as in the expand → migrate → switch → contract table in `migrations.md`.\n\n**Release A (expand):** add the column as nullable. This is metadata-only and fast. The code starts always writing the value.\n\n```sql\n-- 0042_add_status.sql\nSET lock_timeout = '3s';\nALTER TABLE orders ADD COLUMN status text;            -- nullable, no default\n-- constant default is also cheap on PG11+; a volatile default rewrites the table\n```\n\n**Backfill (a separate, resumable job, not a deploy step):**\n\n```ts\n// scripts/backfill-orders-status.ts\nlet lastId = 0n;\nfor (;;) {\n  const { rows } = await pool.query(\n    `WITH batch AS (\n       SELECT id FROM orders WHERE id > $1 AND status IS NULL ORDER BY id LIMIT 5000\n     )\n     UPDATE orders o SET status = 'legacy'\n     FROM batch WHERE o.id = batch.id\n     RETURNING o.id`, [lastId]);\n  if (!rows.length) break;\n  lastId = rows.at(-1).id;          // resumable: log it, restart from here\n  log.info({ lastId }, 'backfill progress');\n  await sleep(100);                  // let replication and autovacuum breathe\n}\n```\n\n**Release B (switch):** the code release must be live first, then add a check constraint without validating it. It applies to new writes immediately and needs only a brief lock.\n\n```sql\nALTER TABLE orders ADD CONSTRAINT orders_status_nn CHECK (status IS NOT NULL) NOT VALID;\n```\n\n**Release C (contract):**\n\n```sql\nSET lock_timeout = '3s';\nALTER TABLE orders VALIDATE CONSTRAINT orders_status_nn; -- scans, but only takes a SHARE UPDATE EXCLUSIVE lock\nALTER TABLE orders ALTER COLUMN status SET NOT NULL;      -- reuses the validated check, no full scan (PG12+)\nALTER TABLE orders DROP CONSTRAINT orders_status_nn;\n```\n\nIndex builds on large tables use `CREATE INDEX CONCURRENTLY` in their own migration with no wrapping transaction. If one fails, drop the `INVALID` index before retrying.\n\n## Fix 2: one release step owns migrations\n\n- **Release step.** Use the platform's pre-deploy or release command, attached to the API service only. It runs once per release before new instances get traffic. A non-zero exit stops the deploy.\n- **No release step?** Run it as a CI job against the target environment before the deploy job. Stop the pipeline on failure.\n- **Command and guard.** It runs `yarn db:migrate`. Add a PostgreSQL advisory lock in the wrapper as a second guard, plus `lock_timeout` in each migration so a blocked `ALTER` fails fast instead of queueing every query behind it.\n- **Start commands.** The API runs `node dist/server.js` and the worker runs `node dist/worker.js`. Neither runs migrations. The build never migrates.\n\nFiles to change:\n- Add `scripts/migrate.ts`: takes the advisory lock, runs the tool, exits non-zero on error.\n- In the platform config or runbook (`STACK.md` and a new `docs/deploy.md`): list the release step, start commands, health path and grace period.\n\n## Fix 3: real health checks\n\n```ts\n// api\napp.get('/health/live',  async () => ({ status: 'ok' }));          // no external checks\napp.get('/health/ready', async (_, reply) => {\n  if (!ready) return reply.code(503).send({ status: 'unavailable' });\n  try { await withTimeout(pool.query('SELECT 1'), 1000); return { status: 'ok' }; }\n  catch { return reply.code(503).send({ status: 'unavailable' }); }\n});\n```\n\n- **Platform check.** Point the platform's check at `/health/ready` for the API.\n- **Liveness stays free of external checks.** A database blip must not restart every replica at once.\n- **Responses stay minimal.** No dependency versions, hosts or error text.\n- **Worker.** It has no public ingress, so check Redis readiness through a small internal endpoint or the platform's process check.\n- **Platform checks may run only at deploy time.** Add a separate uptime monitor and alerts.\n\n## Fix 4: worker shutdown and job safety\n\n```ts\nconst shutdown = async (signal: string) => {\n  log.info({ signal }, 'shutting down');\n  const timer = setTimeout(() => process.exit(1), 25_000).unref(); // below the platform grace period\n  try {\n    await worker.close();   // stop taking jobs, let active ones finish\n    await pool.end();\n    await redis.quit();\n  } finally { clearTimeout(timer); }\n  process.exit(0);\n};\nprocess.once('SIGTERM', () => void shutdown('SIGTERM'));\n```\n\n- **Grace period.** Set the platform's grace period (for example 30–60s) longer than your longest job step. Keep the internal timeout shorter than it.\n- **Stalled jobs and long jobs.** Set `lockDuration` and `stalledInterval` to match real job length. Split or extend long jobs.\n- **Email handlers must be idempotent.** BullMQ delivery is at least once, so a cut-off job is retried and can send twice. Add a table:\n\n```sql\nCREATE TABLE email_sends (\n  job_type text NOT NULL,\n  business_key text NOT NULL,       -- e.g. userId:templateKey:eventId\n  provider_message_id text,\n  sent_at timestamptz,\n  PRIMARY KEY (job_type, business_key)\n);\n```\n\n  Insert the row with `ON CONFLICT DO NOTHING`, send only if the insert won, and pass the provider's idempotency key if it has one. If it has none, a timeout after sending can still duplicate. Record that residual risk.\n- **Retries.** Use attempts with exponential backoff and jitter. Validation errors and provider 4xx responses throw `UnrecoverableError`.\n- **Failed jobs.** Alert on failed-job count or age, and keep `removeOnComplete` and `removeOnFail` limits.\n- **Redis.** It needs `maxmemory-policy noeviction` and AOF persistence.\n- **Test.** Add one that kills the worker mid-job and asserts the job is retried and sends exactly one email.\n\n## CI and runbook\n\n- **Migration CI job.** Apply all migrations from an empty database. Then restore the previous release's schema and apply the new ones. Also run the previous app version's tests against the new schema.\n- **Staging smoke test.** Deploy to staging with the release step before production.\n- **Pre-release checks.** A recent backup and a tested restore. Estimate lock time for each DDL on a production-sized copy.\n- **Rollback note per release.** Say whether old code works with the new schema (preferred), a forward fix is needed, or a restore is needed. Rolling back the app does not roll back the database.\n- **Failure rule.** If a release fails, stop and report the state it left. Then choose a forward fix or a restore. Don't rerun until it passes.\n\n## Summary\n\n| Problem | Do instead |\n|---|---|\n| Big NOT NULL failed mid-deploy | Nullable column → batched backfill job → `NOT VALID` check → `VALIDATE` → `SET NOT NULL`, each as its own release |\n| Migrations in start commands | One release step on one service, with an advisory lock and `lock_timeout` |\n| Always-200 health | Real `/health/live` and `/health/ready`, plus an uptime monitor |\n| Emails cut off on restart | `worker.close()` on `SIGTERM`, a grace period longer than job time, idempotent handlers and a test |"
+}

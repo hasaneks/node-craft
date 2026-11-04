@@ -34,7 +34,7 @@ node-craft, bunları önleyen kuralları ve çalışma sırasını ajana, iş s�
   mesajlar, öncelik sırası net bir locale header'ı, cursor pagination, idempotency anahtarları.
 - **Yalnız ürünün ihtiyacı olan.** Redis, BullMQ, Firebase, FCM, Adapty ve object storage gerekçeyle eklenir, varsayılan
   olarak asla.
-- **Çalıştırmaya hazır.** Railway build'i, pre-deploy migration, dürüst healthcheck, graceful shutdown, CI kapıları,
+- **Her yerde çalıştırmaya hazır.** Belirli bir platform varsayılmaz: migration için tek release adımı, dürüst healthcheck, graceful shutdown, CI kapıları,
   yedekleme ve restore testi.
 
 ## Hızlı başlangıç
@@ -48,7 +48,7 @@ npx skills add hasaneks/node-craft
 (çekirdek) mutlaka kalmalıdır.
 
 Sonra işi düz cümleyle isteyin: *"kitapçı API'si için backend kur"*, *"faturalarımı listeleyen endpoint ekle"*,
-*"sipariş listesi yavaş"*, *"bu webhook bazen premium'u iki kez veriyor"*, *"Railway deploy'unu hazırla"*. Doğru skill
+*"sipariş listesi yavaş"*, *"bu webhook bazen premium'u iki kez veriyor"*, *"deploy'u hazırla"*. Doğru skill
 kendiliğinden yüklenir.
 
 İstemci şart değildir. Henüz istemcisi olmayan bir backend, web veya admin uygulaması, native mobil uygulama ve React
@@ -64,7 +64,7 @@ Native uygulaması aynı skill'leri kullanır.
 | [`node-craft-contract`](skills/node-craft-contract/SKILL.md) | Endpoint eklerken veya değiştirirken, istemci bağlarken | Tek kaynaktan OpenAPI, runtime doğrulama, hata zarfı ve status eşlemesi, locale header'ı, cursor pagination, `Idempotency-Key`, kimlik sonuçları, eski mobil sürümler için sürümleme |
 | [`node-craft-fix`](skills/node-craft-fix/SKILL.md) | Bir şey bozulduğunda | Mevcut durumu kaydeder, gerçek giriş noktasından yeniden üretir, regresyon testi, en küçük düzeltme, kanıt |
 | [`node-craft-perf`](skills/node-craft-perf/SKILL.md) | Bir şey yavaş olduğunda | Bütçeler, `EXPLAIN`, N+1, indeksler, pool ve bağlantı bütçesi, event loop, yük testi, önce/sonra rakamları |
-| [`node-craft-ops`](skills/node-craft-ops/SKILL.md) | Deploy ederken ve işletirken | Railway servisleri, pre-deploy migration, healthcheck, graceful shutdown, CI kapıları, yedekleme ve restore, runbook'lar |
+| [`node-craft-ops`](skills/node-craft-ops/SKILL.md) | Deploy ederken ve işletirken | Her platform: build, start, release adımında migration, healthcheck, graceful shutdown, CI kapıları, yedekleme ve restore, runbook'lar |
 
 Projenin `STACK.md` dosyası, ADR'leri ve mevcut kodu varsayılanların önüne geçer. Şablon:
 [`skills/node-craft-init/references/stack-template.md`](skills/node-craft-init/references/stack-template.md).
@@ -96,7 +96,7 @@ Toplam 50 kural var; çoğunun birden fazla doğrulama türü olduğu için say�
 | API | REST + OpenAPI, runtime doğrulama, `{ data, meta }`, `{ error: { code, message, details }, locale, requestId }` |
 | Testler | Vitest veya Jest, gerçek PostgreSQL ile entegrasyon testleri |
 | Loglar | Redaction ve request id'li Pino JSON |
-| Deploy | Railway |
+| Deploy | Herhangi bir platform; projenin seçimi, release adımı, healthcheck ve kapanma davranışıyla birlikte kayda geçer |
 | İsteğe bağlı | Redis, BullMQ, outbox, Firebase Admin, FCM, Adapty, object storage: yalnız gerektiğinde |
 
 ## rn-craft ile birlikte (isteğe bağlı)

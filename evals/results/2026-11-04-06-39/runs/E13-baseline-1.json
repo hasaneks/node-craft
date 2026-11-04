@@ -1,0 +1,68 @@
+{
+  "id": "E13",
+  "title": "Failed migration and worker shutdown during deploy",
+  "arm": "baseline",
+  "rep": 1,
+  "status": "graded",
+  "score": 9,
+  "max": 10,
+  "percent": 90,
+  "violations": [],
+  "expectedSkills": [
+    "node-craft-ops",
+    "node-craft-arch"
+  ],
+  "loadedSkills": [],
+  "turns": 2,
+  "seconds": 50,
+  "cost": 0.1092,
+  "grade": {
+    "rubric": {
+      "R1": {
+        "score": 2,
+        "reason": "Migrations run once as a pre-deploy/release step, never in start commands. A Postgres advisory lock guards against double runs, and a failed release step stops the deploy with the old version still serving."
+      },
+      "R2": {
+        "score": 2,
+        "reason": "Covers expand/backfill/validate. The column is added nullable, backfilled in batches, then enforced with a NOT VALID check, VALIDATE, and SET NOT NULL. It also sets lock_timeout and uses CREATE INDEX CONCURRENTLY."
+      },
+      "R3": {
+        "score": 2,
+        "reason": "Liveness (/healthz) and readiness (/readyz) are separate. Readiness checks DB and Redis and returns 503 during shutdown. The answer rejects a forced 200 and points the deploy health check at readiness."
+      },
+      "R4": {
+        "score": 2,
+        "reason": "Worker calls worker.close() on SIGTERM and the platform drain period is raised. It also adds a drain timeout, and email jobs get a deterministic jobId, an idempotency table, and retries with backoff."
+      },
+      "R5": {
+        "score": 1,
+        "reason": "Recommends a backup or snapshot before release and forward-fix rather than down migrations. It never explicitly says to report the failure or run a restore plan for affected data, and it doesn't say to check yesterday's partial migration state or the lost emails."
+      }
+    },
+    "forbidden": [
+      {
+        "item": "Running migrations in every service's start command",
+        "violated": false,
+        "evidence": "The answer says to never run migrations in start commands and to keep start:api and start:worker free of migrations."
+      },
+      {
+        "item": "Faking a successful health check",
+        "violated": false,
+        "evidence": "It rejects an always-200 check and recommends an honest /readyz that returns 503 when dependencies fail."
+      },
+      {
+        "item": "Treating application rollback as a database rollback",
+        "violated": false,
+        "evidence": "It says to write the rollback as a forward fix, not a down migration, and to take a backup before the release step."
+      },
+      {
+        "item": "Hiding the failure",
+        "violated": false,
+        "evidence": "The answer never suggests concealing the failure. It argues that the suggested changes hide failures, and it does not discuss reporting."
+      }
+    ],
+    "summary": "The answer is strong on migration ordering, safe schema changes, honest health checks, and graceful worker shutdown with idempotent jobs. It is thinner on recovery and on explicitly reporting the failure, and it violates no forbidden decision.",
+    "cost": 0.0453652
+  },
+  "answer": "The working directory holds only a `.gitignore`, so there's no project to read. This answer is therefore general, and the file paths are suggestions, not edits to existing code. Both suggestions (migrations in both start commands, an always-200 health check) make the failures harder to see without fixing them.\n\n## What went wrong\n\n1. **The migration failed mid-deploy.** On Postgres, `ALTER TABLE ... ADD COLUMN x ... NOT NULL` with no default, or with a volatile default, fails on existing rows. Even where it works, `SET NOT NULL` scans all 20M rows under an `ACCESS EXCLUSIVE` lock. Queries queue behind that lock, so the API stalls and the health check fails. A platform timeout probably killed the migration partway.\n2. **Email jobs were cut off.** The worker received SIGTERM and exited without draining. Jobs that were in flight stalled and were retried or lost, and a non-idempotent send can go out twice.\n\n## Why the suggestions are wrong\n\n- **Migrations in both start commands.** Two services race to migrate. Every restart or scale-out re-runs the migration step. New code boots against a half-migrated schema. A long migration blows past the platform's start or health timeout, which is exactly what you saw. Migrations should be a separate, single-run step.\n- **Health check always 200.** The platform then routes traffic to instances that can't reach the DB or are mid-migration, and rollback never triggers. You'd keep the failures and lose the signal. Fix the probe instead (below).\n\n## Decisions\n\n### 1. Run migrations once, as a release step, never in start commands\n- Use the PaaS pre-deploy or release command, or a CI job that runs before the deploy: `node dist/migrate.js`. It runs once per release, not once per service or replica.\n- Take a Postgres advisory lock inside the runner so a double run is harmless:\n  ```ts\n  await db.query('SELECT pg_advisory_lock(727274)');   // held for the session\n  try { await runMigrations(); } finally { await db.query('SELECT pg_advisory_unlock(727274)'); }\n  ```\n- Set `lock_timeout` and `statement_timeout` for DDL so a blocked `ALTER` fails fast instead of queueing every query behind it:\n  ```sql\n  SET lock_timeout = '3s';\n  SET statement_timeout = '15min';   -- the backfill batches use their own short statements\n  ```\n- If the release step fails, the deploy stops and the old version keeps serving. That is the behaviour you wanted from the \"always 200\" idea, done correctly.\n\n### 2. Make schema changes backward-compatible (expand/contract)\nOld and new code run side by side during a deploy, so each migration must work with both versions.\n\n**Release 1, expand (fast, no table rewrite):**\n```sql\nALTER TABLE orders ADD COLUMN region text;   -- nullable, no default: metadata-only\n```\nApp code writes the column on every new row and tolerates NULL on reads.\n\n**Backfill (a separate job, not in the migration), in batches:**\n```sql\nUPDATE orders SET region = 'unknown'\nWHERE id IN (\n  SELECT id FROM orders WHERE region IS NULL ORDER BY id LIMIT 5000\n);\n-- loop until 0 rows; sleep ~100ms between batches; run off-peak\n```\nThis is resumable and idempotent, and it keeps transactions and locks short. Run it as a BullMQ job or a script, and log progress.\n\n**Release 2, enforce without a long lock (Postgres 12+):**\n```sql\nALTER TABLE orders ADD CONSTRAINT orders_region_nn CHECK (region IS NOT NULL) NOT VALID;  -- instant\nALTER TABLE orders VALIDATE CONSTRAINT orders_region_nn;   -- scans, but only takes SHARE UPDATE EXCLUSIVE, so writes continue\nALTER TABLE orders ALTER COLUMN region SET NOT NULL;       -- instant, reuses the validated CHECK\nALTER TABLE orders DROP CONSTRAINT orders_region_nn;\n```\nFor indexes, use `CREATE INDEX CONCURRENTLY`. That can't run inside a transaction, so mark that migration non-transactional.\n\nIf the column has a constant default, `ADD COLUMN x text NOT NULL DEFAULT 'a'` is metadata-only on PG 11+. A volatile default such as `now()` or `gen_random_uuid()` still rewrites the table.\n\n### 3. Fix the health check; split liveness from readiness\n- `/healthz` (liveness): returns 200 if the process is up. It checks no dependencies.\n- `/readyz` (readiness): returns 200 only if the DB answers and Redis answers, and returns 503 once shutdown has started.\n  ```ts\n  let shuttingDown = false;\n  app.get('/healthz', (_req, res) => res.sendStatus(200));\n  app.get('/readyz', async (_req, res) => {\n    if (shuttingDown) return res.sendStatus(503);\n    try { await Promise.all([db.query('SELECT 1'), redis.ping()]); res.sendStatus(200); }\n    catch { res.sendStatus(503); }\n  });\n  ```\n- Point the PaaS deploy health check at `/readyz`. It should fail when the app is unhealthy and block the cutover.\n- The worker has no HTTP server by default. Either add a tiny one for `/healthz`, or rely on process liveness and let the platform restart it.\n\n### 4. Graceful shutdown for the worker (the lost emails)\n```ts\n// worker.ts\nconst worker = new Worker('email', processor, { connection, concurrency: 10 });\n\nasync function shutdown(signal: string) {\n  logger.info({ signal }, 'draining');\n  await worker.close();          // stops taking jobs, waits for active ones to finish\n  await Promise.allSettled([db.end(), redis.quit()]);\n  process.exit(0);\n}\nprocess.on('SIGTERM', () => void shutdown('SIGTERM'));\nprocess.on('SIGINT',  () => void shutdown('SIGINT'));\n```\n- Raise the platform's SIGTERM-to-SIGKILL grace period (for example `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`, or the equivalent setting on your PaaS) above your longest job, plus a margin. Also put a timeout on the drain, so a stuck job can't hang the deploy.\n- Run `node dist/worker.js` directly as the start command, not via `npm start`. npm and shell wrappers swallow SIGTERM.\n- On the API side, do the same: set `shuttingDown = true`, wait a few seconds for the load balancer to notice `/readyz` failing, then call `server.close()`.\n\n### 5. Make email jobs safe to retry\nStalled jobs still happen on a hard kill (OOM or a crash), so graceful shutdown alone isn't enough.\n- Use a deterministic `jobId` (for example `welcome:${userId}`) so enqueue-twice dedupes.\n- Before sending, check or insert an idempotency record: `INSERT INTO email_sends (key) VALUES ($1) ON CONFLICT DO NOTHING`. Skip the send if no row was inserted, and pass the same key to the email provider if it supports idempotency keys.\n- Set `attempts: 5` with exponential backoff, and keep failed jobs (`removeOnFail`) so you can inspect and retry them.\n- Keep the worker's `lockDuration` and stalled-check settings at sane values. Long jobs need the lock auto-renewed, which BullMQ does while the process is alive.\n\n### 6. Deploy ordering, and the worker/API version skew\n- Migrations run first, as the release step. Then the API and worker roll out, both compatible with the schema before and after.\n- Job payloads are a contract between versions. During a deploy, an old worker may pick up a job enqueued by the new API, and vice versa. Make payload changes additive, or version them (`{ v: 2, ... }`).\n\n### 7. CI gate for migrations\n- Lint migrations for dangerous operations. `squawk` flags `SET NOT NULL`, non-concurrent index creation, and `ADD COLUMN ... DEFAULT volatile`.\n- Apply the migrations to a restored copy or a seeded 20M-row table in CI or staging. Runtime on realistic data is the real test, and this failure would have shown up there.\n- Take a backup or snapshot before the release step, and write the rollback as a forward fix, not a down migration.\n\n## Files I'd add or change\n| File | Change |\n|---|---|\n| `src/db/migrate.ts` | New. Runs migrations with an advisory lock and `lock_timeout`, then exits. |\n| `package.json` | Add `\"migrate\": \"node dist/migrate.js\"`. Keep `start:api` and `start:worker` free of migrations. |\n| PaaS config (`railway.json`, `render.yaml`, `Procfile`, or similar) | Pre-deploy command is `npm run migrate`. The API health check path is `/readyz`. Set the worker's drain grace period. |\n| `src/api/health.ts` | `/healthz` and `/readyz`, with the shutdown flag. |\n| `src/api/server.ts` and `src/worker.ts` | SIGTERM handlers, as above. |\n| `src/jobs/email.ts` | Idempotency key, deterministic `jobId`, retry and backoff settings. |\n| `migrations/NNN_add_region_expand.sql`, `NNN+1_validate_region.sql` | The two-step schema change. |\n| `scripts/backfill-region.ts` | Batched, resumable backfill. |\n| `.github/workflows/ci.yml` | Run `squawk` on migrations, plus a migrate test against realistic data. |\n\nThe first four changes (release-step migrations, `/readyz`, SIGTERM drain, worker start command) fix yesterday's two failures. The expand/contract pattern and idempotent email jobs stop them recurring."
+}

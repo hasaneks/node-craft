@@ -11,4 +11,5 @@ First release.
   signed cursors, idempotent writes under concurrency and a transactional outbox, on real PostgreSQL.
 - Thirteen task-based eval scenarios with a runner that compares agents with and without the skills.
 - Optional rn-craft companion guide and a proposed patch for rn-craft 0.2.0.
+- Deployment guidance is platform-neutral (no hosting platform assumed).
 - Official sources verified on 2026-11-04.

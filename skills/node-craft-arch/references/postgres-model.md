@@ -1,6 +1,6 @@
 # PostgreSQL data model
 
-- PostgreSQL is the main persistent store. Use a current stable major that Railway (or the chosen platform)
+- PostgreSQL is the main persistent store. Use a current stable major that the chosen platform
   supports and that the ORM supports; record it. Never upgrade the database major automatically.
 - Design entities, relations and critical rules before writing code. Do not add fields "for later".
 

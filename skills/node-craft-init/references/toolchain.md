@@ -11,8 +11,8 @@ written). Pin what you choose.
   table can lag a new LTS; if the chosen framework does not yet list the new line, either confirm compatibility by
   running its test suite on it and record that, or stay on the previous LTS until support is listed, and write the
   reason in `STACK.md`.
-- Record the version in `engines.node`, `.nvmrc` (or `.node-version`), the CI setup step, and the Railway build
-  (Railpack honours `engines` / `.nvmrc`; a Dockerfile pins the base image tag).
+- Record the version in `engines.node`, `.nvmrc` (or `.node-version`), the CI setup step, and the deploy build
+  (buildpacks usually read `engines` / `.nvmrc`; a Dockerfile pins the base image tag).
 
 ## Yarn
 

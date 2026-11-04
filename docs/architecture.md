@@ -13,9 +13,10 @@ The design started from a review of rn-craft at commit `949cb6a` (0.2.0) and the
 | rn-craft lets the project's own files win (`DESIGN.md`, `STACK.md`) | Every node-craft skill reads `AGENTS.md`, `CLAUDE.md`, `STACK.md`, ADRs and existing code first |
 | rn-craft ships 21 lint rules because many UI mistakes are visible in syntax | Backend failures that matter (transactions, tenant filters, idempotency, webhook order) are not provable from syntax. No lint plugin in v0.1; `RULES.md` labels each rule `lint`, `test`, `contract`, `measurement` or `review`, and `lint` only names existing ESLint/TypeScript rules |
 | Skill installers copy skill folders one by one | No skill links outside its own folder. Shared rules live in the `node-craft` core skill and others refer to it **by name** (`node-craft` → `references/workflow-tdd.md`). The integrity test rejects `../` links from skill files |
+| Hosting differs from team to team | No platform is assumed. `node-craft-ops` describes the pieces every platform has (build, start, release step, health checks, grace period, networking, storage) and asks the agent to map them for the chosen platform in `STACK.md` |
 | Optional services must stay optional | Redis, BullMQ, outbox, Firebase, FCM, Adapty and object storage are written as conditional sections, and evals check that a plain API gets none of them |
 | rn-craft compatibility must not become a dependency | The client contract is framework-neutral (`node-craft-contract`); rn-craft specifics live in `docs/compatibility/rn-craft.md`, outside the skills |
-| Versions and platform facts change | Skills state policies; dated observations live in `sources.md` files and in `references/railway.md` |
+| Versions and platform facts change | Skills state policies; dated observations live in `sources.md` files |
 
 ## Skills
 
@@ -27,7 +28,7 @@ The design started from a review of rn-craft at commit `949cb6a` (0.2.0) and the
 | `node-craft-contract` | REST, OpenAPI, validation, errors, locale header, pagination, idempotency keys, auth outcomes, versioning, client integration | Client UI and storage decisions |
 | `node-craft-fix` | Reproduce, regression test, smallest fix, proof | Unrequested refactors |
 | `node-craft-perf` | Budgets, measurement, queries, pool, event loop, load tests | Speed claims without numbers |
-| `node-craft-ops` | Railway, CI gates, health, shutdown, backups, runbooks | Starting paid resources or production releases on its own |
+| `node-craft-ops` | Deployment on any platform, CI gates, health, shutdown, backups, runbooks | Starting paid resources or production releases on its own |
 
 TDD is not a separate skill: it is in the core skill, which every other skill points to.
 

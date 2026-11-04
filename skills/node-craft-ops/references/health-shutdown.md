@@ -21,7 +21,7 @@
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, 'shutting down');
   ready = false;                       // /health/ready starts failing
-  const timer = setTimeout(() => process.exit(1), 25_000).unref(); // below the platform's draining time
+  const timer = setTimeout(() => process.exit(1), 25_000).unref(); // below the platform's grace period
   try {
     await app.close();                 // stop accepting, finish in-flight requests, run onClose hooks
     await worker?.close();             // BullMQ: stop taking jobs, let active ones finish

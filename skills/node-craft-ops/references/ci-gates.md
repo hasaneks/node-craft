@@ -60,7 +60,7 @@ Pin action versions as your organization requires (tag or commit SHA).
 
 | Change | Order |
 |---|---|
-| Additive (new table, nullable column, new index) | Migrate (pre-deploy) → deploy code |
+| Additive (new table, nullable column, new index) | Migrate (release step) → deploy code |
 | Code stops using a column | Deploy code → later release drops the column |
 | Rename or type change | Expand → backfill → switch code → contract, over several releases |
 

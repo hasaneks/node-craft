@@ -4,7 +4,7 @@ Only when the product stores files.
 
 - Model each file: owner (user and tenant), access policy (private, shared with, public), size, content type, purpose,
   retention, status (`pending`, `ready`, `rejected`).
-- A container's local disk on Railway is not durable user storage. Use object storage (S3-compatible) or a
+- A container's local disk is not durable user storage on most platforms. Use object storage (S3-compatible) or a
   deliberately designed volume whose deploy and scaling behaviour you have checked in current platform docs.
 
 ## Upload

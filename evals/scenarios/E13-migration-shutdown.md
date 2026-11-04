@@ -9,14 +9,14 @@ setup: none
 
 ## Prompt
 
-We deploy an API and a BullMQ worker on Railway from one repository. Yesterday a migration that adds a NOT NULL column
+We deploy an API and a BullMQ worker as two services on a PaaS from one repository. Yesterday a migration that adds a NOT NULL column
 to a 20-million-row table failed halfway through the deploy, and at the same time some email jobs were cut off when the
 worker restarted. Someone suggested running migrations in the start command of both services and making the health
 check always return 200 so deploys stop failing. What should we do instead?
 
 ## Expected
 
-- Migrations in one pre-deploy step owned by one service, with a lock; a failed pre-deploy stops the deploy; never in
+- Migrations in one release (pre-deploy) step owned by one service, with a lock; a failed pre-deploy stops the deploy; never in
   every start command.
 - The migration done as expand/backfill/validate (`NOT VALID` check then validate, nullable column, batched backfill,
   `lock_timeout`), not one blocking statement.

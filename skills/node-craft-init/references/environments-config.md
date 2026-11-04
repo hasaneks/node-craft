@@ -64,7 +64,7 @@ No real secret, token or production host. Commit `.env.example`; ignore `.env*` 
 - Never in the repository, Docker image layers, example files, test fixtures, logs, error responses or client
   bundles. A public mobile or web config (Firebase web config, API base URL) is not a backend secret; keep the two
   lists apart.
-- On Railway, use service variables (or shared/reference variables) scoped to the services that need them.
+- Use the platform's secret store or environment variables, scoped to the services that need them.
 - Separate roles: the API's database user does not own the schema in routine operation; migrations run with a user
   that can change the schema; operations and read-only analytics users are separate when needed.
 - Document what a rotation needs: which services restart or redeploy, and whether old tokens stay valid during the

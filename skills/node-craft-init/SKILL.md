@@ -40,7 +40,7 @@ all start the same way. No client technology is a prerequisite.
 3. Pin exact versions and record them, with the verification date, in `STACK.md`. If you cannot reach the official
    source, say so, use `references/sources.md` as a dated starting point, and mark the versions as unverified.
 4. Node and Yarn versions live in project metadata (`engines`, `packageManager`, `.nvmrc` or `.node-version`) and
-   the same versions are used locally, in CI and on Railway.
+   the same versions are used locally, in CI and in the deploy build.
 
 ## 3. Decide, then record
 
@@ -53,6 +53,8 @@ all start the same way. No client technology is a prerequisite.
 - **API:** REST + OpenAPI with runtime validation from one schema source (`node-craft-contract`).
 - **Architecture:** a modular monolith. No microservices, CQRS or event sourcing without a concrete need. API and
   worker can share one codebase and image with different start commands.
+- **Hosting:** none is assumed. Use the platform the project already has; otherwise decide it from the intake (or ask)
+  and record it, with how its release step, health checks and shutdown work (`node-craft-ops`).
 - **Optional infrastructure:** Redis, BullMQ, Firebase Admin, FCM, Adapty, email and object storage only when a
   feature in the intake needs them (`node-craft-arch`).
 
@@ -86,7 +88,7 @@ Keep them short and true to the code; never create a document for a technology t
 | Test guide | TDD flow, test environment, fixtures, critical scenarios |
 | Performance budget | Targets, realistic data and load, measured results |
 | Migration guide | Expand/contract, backfill, rollback or forward fix |
-| Deploy runbook | Railway settings, pre-deploy, health check, smoke test |
+| Deploy runbook | Platform settings, release step, health check, smoke test |
 | Operations runbook | Alerts, failed jobs, webhook replay, backup and restore |
 | `.env.example` | Variable names, descriptions, safe samples |
 
