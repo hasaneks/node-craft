@@ -5,9 +5,9 @@ Keep it small, concrete and verified.
 
 ## Before you open a pull request
 
-1. `npm test` passes (package integrity: frontmatter, links, anchors, rules, coverage).
-2. If you changed code in `fixtures/contract-kit` or a reference that quotes it: `yarn test` there passes, including
-   the PostgreSQL integration tests.
+1. `npm run check` passes. It runs the package integrity tests and the contract kit (typecheck, unit and PostgreSQL
+   integration tests; needs a container runtime). The GitHub workflow is manual for now, so this local run is the
+   gate.
 3. If you changed a skill's guidance in a way an eval covers, run that eval (`npm run evals -- --only E07`) and put
    the before and after scores in the pull request. Evals cost money; say if you could not run them.
 
@@ -23,6 +23,11 @@ Keep it small, concrete and verified.
   Exceptions and Skill, and into `docs/requirements-coverage.md` if they cover a requirement section.
 - Code in references should come from, or be checked against, `fixtures/contract-kit`.
 - Plain, direct English. No marketing words.
+
+## Images
+
+The README images are HTML in `docs/images/src/`, rendered to PNG with headless Chrome: `npm run images`. Update the
+numbers in `eval-results.html` when you rerun the evals.
 
 ## Reporting a problem
 

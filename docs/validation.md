@@ -99,5 +99,6 @@ out both bad suggestions).
 - Deployment guidance is platform-neutral and has not been exercised by a real deployment on any platform.
 - Firebase Admin, BullMQ, Redis and Adapty guidance is not exercised by the contract kit; only PostgreSQL behaviour
   is.
-- The GitHub Actions workflow is written but has not run yet; it runs on the first push.
+- The GitHub Actions workflow has not run: Actions is not enabled for the account, so the workflow is manual
+  (`workflow_dispatch`) and the same checks run locally with `npm run check`.
 - `npx skills add hasaneks/node-craft` cannot be tested until the repository is public.

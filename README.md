@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/images/cover.png" alt="node-craft: agent skills for Node.js backends that keep working after the demo" width="100%">
+</p>
+
+<p align="center">
   <b>English</b> · <a href="README.tr.md">Türkçe</a>
 </p>
 
@@ -37,6 +41,20 @@ node-craft gives the agent the rules and the order of work that prevent these, a
 - **Ready to run anywhere.** No hosting platform assumed: one release step for migrations, honest health checks, graceful shutdown, CI gates, backups
   and restore tests.
 
+## Does it change what agents do?
+
+We gave the same agent the same 13 backend tasks with and without node-craft and graded every answer blind against a
+rubric. The biggest gains are where agents usually go wrong quietly: duplicate writes, complex domains, a fresh
+project's stack, and webhooks that arrive out of order.
+
+<p align="center">
+  <img src="docs/images/eval-results.png" alt="Scores on 13 backend tasks: 82.2% without skills, 96.9% with node-craft; no forbidden decisions in 39 runs" width="100%">
+</p>
+
+The code the skills quote is tested on real PostgreSQL (`fixtures/contract-kit`), and on a copy of a production NestJS
+backend the agent kept every existing decision. Scenarios, raw answers, costs and limits:
+[`docs/validation.md`](docs/validation.md).
+
 ## Quick start
 
 ```bash
@@ -55,6 +73,10 @@ No client is required. A backend with no client yet, a web or admin app, a nativ
 all use the same skills.
 
 ## Skills
+
+<p align="center">
+  <img src="docs/images/how-it-works.png" alt="Read the project first, then the core skill, then the skill for the task; done means checks that ran" width="100%">
+</p>
 
 | Skill | Use it when | What it does |
 |---|---|---|
@@ -134,6 +156,7 @@ for new projects.
 ## Development
 
 ```bash
+npm run check                     # everything below except evals, in one command
 npm test                          # package integrity tests, zero dependencies
 cd fixtures/contract-kit
 yarn install --immutable

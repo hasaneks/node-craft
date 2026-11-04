@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/images/cover.png" alt="node-craft: demodan sonra da çalışan Node.js backend'leri için agent skill'leri" width="100%">
+</p>
+
+<p align="center">
   <a href="README.md">English</a> · <b>Türkçe</b>
 </p>
 
@@ -37,6 +41,20 @@ node-craft, bunları önleyen kuralları ve çalışma sırasını ajana, iş s�
 - **Her yerde çalıştırmaya hazır.** Belirli bir platform varsayılmaz: migration için tek release adımı, dürüst healthcheck, graceful shutdown, CI kapıları,
   yedekleme ve restore testi.
 
+## Ajanların yaptığını gerçekten değiştiriyor mu?
+
+Aynı ajana aynı 13 backend görevini node-craft ile ve node-craft olmadan verdik, her cevabı hangi koldan geldiğini
+bilmeyen bir değerlendiriciyle rubriğe göre puanladık. En büyük farklar, ajanların genelde sessizce hata yaptığı
+yerlerde: çift yazmalar, karmaşık domain'ler, yeni projenin stack'i ve sırası bozuk gelen webhook'lar.
+
+<p align="center">
+  <img src="docs/images/eval-results.png" alt="13 backend görevinde puanlar: skill'siz %82,2, node-craft ile %96,9; 39 koşuda hiç yasak karar yok" width="100%">
+</p>
+
+Skill'lerin alıntıladığı kod gerçek PostgreSQL üzerinde test edilir (`fixtures/contract-kit`). Production'daki bir
+NestJS backend'inin kopyasında da ajan mevcut kararların hiçbirini değiştirmedi. Senaryolar, ham cevaplar, maliyetler
+ve sınırlar: [`docs/validation.md`](docs/validation.md).
+
 ## Hızlı başlangıç
 
 ```bash
@@ -55,6 +73,10 @@ kendiliğinden yüklenir.
 Native uygulaması aynı skill'leri kullanır.
 
 ## Skill'ler
+
+<p align="center">
+  <img src="docs/images/how-it-works.png" alt="Önce proje okunur, sonra çekirdek skill, sonra işe uygun skill; bitti demek çalıştırılmış kontroller demek" width="100%">
+</p>
 
 | Skill | Ne zaman | Ne yapar |
 |---|---|---|
@@ -136,6 +158,7 @@ kaçınır.
 ## Geliştirme
 
 ```bash
+npm run check                     # evals hariç aşağıdakilerin hepsi, tek komutla
 npm test                          # paket bütünlüğü testleri, bağımlılık yok
 cd fixtures/contract-kit
 yarn install --immutable

@@ -1,0 +1,69 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+  .canvas { width: 2560px; height: 1280px; }
+  .left { position: absolute; left: 144px; top: 150px; width: 1180px; }
+  .left .pill { font-size: 34px; padding: 18px 34px; }
+  h1 { font-size: 236px; font-weight: 800; letter-spacing: -11px; line-height: 1; margin: 64px 0 52px -8px; }
+  h1 .hy { color: var(--accent); }
+  .tag { font-size: 58px; font-weight: 600; line-height: 1.24; letter-spacing: -1px; color: #e4e4e7; }
+  .chips { display: flex; flex-wrap: wrap; gap: 22px; margin-top: 72px; }
+  .chips .chip { font-size: 38px; padding: 20px 30px; }
+  .cmd { position: absolute; left: 144px; bottom: 120px; font-family: var(--mono); font-size: 44px; color: #d4d4d8; }
+  .cmd .ps { color: var(--accent); margin-right: 22px; }
+
+  .req { position: absolute; left: 1372px; top: 120px; width: 1068px; padding: 40px 40px; transform: rotate(-1.2deg); }
+  .req .bar { display: flex; gap: 12px; margin-bottom: 30px; }
+  .req .bar i { width: 18px; height: 18px; border-radius: 50%; background: #3a3b45; display: block; }
+  .req pre { font-family: var(--mono); font-size: 25.5px; line-height: 1.5; color: #d4d4d8; }
+  .k { color: var(--blue); } .s { color: #f0c38e; } .c { color: var(--muted); } .h { color: var(--violet); }
+  .badge { position: absolute; font-family: var(--mono); font-weight: 700; font-size: 36px; letter-spacing: 3px;
+    padding: 12px 26px; border-radius: 16px; }
+  .b-ok { right: 140px; top: 70px; background: var(--accent-dim); color: var(--accent); transform: rotate(2deg); }
+
+  .find { position: absolute; left: 1280px; top: 790px; width: 1150px; padding: 40px 48px; background: rgba(23, 24, 31, 0.96); }
+  .row { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 31px; line-height: 1.68; }
+  .row span:first-child { color: #ececf0; } .row span:last-child { color: var(--muted); }
+  .row .ic { display: inline-block; width: 44px; }
+  .row .ic.bad { color: var(--red); } .row .ic.warn { color: var(--amber); } .row .last .ic { color: var(--accent); }
+  .last { color: var(--accent) !important; }
+</style></head>
+<body><div class="canvas">
+  <div class="left">
+    <div class="pill"><span class="dot"></span>agent skills for Node.js backends</div>
+    <h1>node<span class="hy">-</span>craft</h1>
+    <p class="tag">Backends that keep working after the demo: decided stacks, honest tests, safe data.</p>
+    <div class="chips">
+      <span class="chip"><b>7</b> agent skills</span>
+      <span class="chip"><b>50</b> rules</span>
+      <span class="chip">Tested on PostgreSQL</span>
+      <span class="chip">Any client</span>
+      <span class="chip">Any platform</span>
+    </div>
+  </div>
+  <div class="cmd"><span class="ps">$</span>npx skills add hasaneks/node-craft</div>
+
+  <div class="card req">
+    <div class="bar"><i></i><i></i><i></i></div>
+<pre><span class="h">POST</span> /api/v1/orders
+<span class="h">Idempotency-Key:</span> 9f2c…e1   <span class="h">X-App-Locale:</span> tr
+
+<span class="c">← 409  Content-Language: tr</span>
+{
+  <span class="k">"error"</span>: {
+    <span class="k">"code"</span>: <span class="s">"IDEMPOTENCY_KEY_REUSED"</span>,
+    <span class="k">"message"</span>: <span class="s">"Bu istek farklı bir işlem için zaten kullanıldı."</span>
+  },
+  <span class="k">"locale"</span>: <span class="s">"tr"</span>, <span class="k">"requestId"</span>: <span class="s">"4f9c2d1e"</span>
+}</pre>
+  </div>
+  <div class="badge b-ok">ONE CONTRACT</div>
+
+  <div class="card find">
+    <div class="row"><span><span class="ic bad">✖</span>SELECT, then INSERT</span><span>UNIQUE + Idempotency-Key</span></div>
+    <div class="row"><span><span class="ic bad">✖</span>userId from the body</span><span>verified token, tenant in query</span></div>
+    <div class="row"><span><span class="ic warn">▲</span>migrate on every boot</span><span>one release step, with a lock</span></div>
+    <div class="row"><span><span class="ic warn">▲</span>health check returns 200</span><span>honest readiness</span></div>
+    <div class="row"><span class="last"><span class="ic">✔</span>82% → 97% on 13 task evals</span><span></span></div>
+  </div>
+</div></body></html>

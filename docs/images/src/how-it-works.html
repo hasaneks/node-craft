@@ -1,0 +1,91 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+  .canvas { width: 2560px; height: 1440px; }
+  .title { position: absolute; left: 120px; top: 92px; }
+  .title h2 { font-size: 76px; font-weight: 800; letter-spacing: -2.5px; }
+  .title p { font-size: 34px; color: var(--text-2); margin-top: 14px; line-height: 1.35; }
+  .step { font-family: var(--mono); font-size: 26px; color: var(--accent); letter-spacing: 2px; margin-bottom: 18px; }
+  .col { position: absolute; padding: 40px 44px; }
+  .col h3 { font-size: 42px; font-weight: 750; letter-spacing: -0.8px; margin-bottom: 26px; }
+  .col ul { list-style: none; }
+  .col li { font-size: 30px; line-height: 1.32; color: #e4e4e7; padding: 12px 0; border-top: 2px solid #23242d; }
+  .col li:first-child { border-top: 0; }
+  .col li .m { font-family: var(--mono); font-size: 28px; color: var(--text); }
+  .col .note { font-size: 26px; color: var(--muted); margin-top: 22px; line-height: 1.35; }
+  #a { left: 120px; top: 350px; width: 560px; height: 760px; }
+  #b { left: 770px; top: 350px; width: 520px; height: 760px; border-color: rgba(116,227,154,0.45); }
+  #c { left: 1380px; top: 350px; width: 1060px; height: 760px; }
+  .sk { display: grid; grid-template-columns: 380px 1fr; align-items: baseline; padding: 15px 0; border-top: 2px solid #23242d; }
+  .sk:first-of-type { border-top: 0; }
+  .sk .n { font-family: var(--mono); font-size: 29px; color: var(--accent); }
+  .sk .d { font-size: 29px; color: #e4e4e7; line-height: 1.3; }
+  .done { position: absolute; left: 120px; top: 1184px; width: 2320px; padding: 34px 40px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .done .step { margin: 0 14px 0 0; }
+  .done .chip { font-size: 27px; padding: 12px 20px; font-weight: 550; white-space: nowrap; }
+  .done .step { white-space: nowrap; }
+  svg.arrows { position: absolute; left: 0; top: 0; }
+</style></head>
+<body><div class="canvas">
+  <div class="title">
+    <h2>How the skills work together</h2>
+    <p>Every task starts from the project's own decisions and ends with checks that actually ran.<br>Each skill opens only the reference files the task needs.</p>
+  </div>
+
+  <div class="card col" id="a">
+    <div class="step">1 · READ THE PROJECT</div>
+    <h3>Its decisions win</h3>
+    <ul>
+      <li><span class="m">AGENTS.md</span> · <span class="m">CLAUDE.md</span></li>
+      <li><span class="m">STACK.md</span> and <span class="m">docs/adr/</span></li>
+      <li>Framework, ORM, auth, package manager already in use</li>
+      <li>Current test results, recorded before any change</li>
+    </ul>
+    <p class="note">New project? <span class="mono ok">node-craft-init</span> makes these decisions from the product and writes them down.</p>
+  </div>
+
+  <div class="card col" id="b">
+    <div class="step">2 · CORE SKILL</div>
+    <h3><span class="mono">node-craft</span></h3>
+    <ul>
+      <li>Red → Green → Refactor</li>
+      <li>Never weaken a test to get green</li>
+      <li>Optional services only when needed</li>
+      <li>The server is the authority</li>
+      <li>Definition of done</li>
+      <li>Report only what ran</li>
+    </ul>
+  </div>
+
+  <div class="card col" id="c">
+    <div class="step">3 · THE SKILL FOR THE TASK</div>
+    <div class="sk"><span class="n">node-craft-init</span><span class="d">New backend: Fastify or NestJS, Prisma or Drizzle, toolchain, ADRs</span></div>
+    <div class="sk"><span class="n">node-craft-arch</span><span class="d">Data model, transactions, auth and tenants, queues, outbox, webhooks</span></div>
+    <div class="sk"><span class="n">node-craft-contract</span><span class="d">OpenAPI, error codes, locale, pagination, idempotency, old clients</span></div>
+    <div class="sk"><span class="n">node-craft-fix</span><span class="d">Reproduce, regression test, smallest fix, proof</span></div>
+    <div class="sk"><span class="n">node-craft-perf</span><span class="d">Budgets, EXPLAIN, N+1, pool, event loop, before and after</span></div>
+    <div class="sk"><span class="n">node-craft-ops</span><span class="d">Any platform: release step, health, shutdown, CI, backups</span></div>
+  </div>
+
+  <div class="card done">
+    <div class="step">4 · DONE MEANS</div>
+    <span class="chip">Contract in OpenAPI</span>
+    <span class="chip">Auth + tenant isolation</span>
+    <span class="chip">Right language, stable codes</span>
+    <span class="chip">Constraints + concurrency</span>
+    <span class="chip">Idempotent writes</span>
+    <span class="chip">Within budget</span>
+    <span class="chip">No secrets in logs</span>
+    <span class="chip">Checks that ran</span>
+  </div>
+
+  <svg class="arrows" width="2560" height="1440" viewBox="0 0 2560 1440">
+    <defs><marker id="h" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#74e39a"/></marker></defs>
+    <g stroke="#74e39a" stroke-width="4" fill="none" marker-end="url(#h)" opacity="0.9">
+      <path d="M684 730 L762 730"/>
+      <path d="M1294 730 L1372 730"/>
+      <path d="M1910 1114 L1910 1176"/>
+    </g>
+  </svg>
+</div></body></html>
